@@ -39,7 +39,7 @@ def remaining_budget() -> float:
     print(f"Spend so far ${spent:.2f} of cap ${cap:.2f}; ${left:.2f} left.")
     if left <= 0.5:
         print("Spend cap reached. Not forecasting.")
-        sys.exit(1)
+        sys.exit(0)
     run_cap = float(os.getenv("RUN_CAP_USD", "0") or 0)
     if run_cap > 0 and run_cap < left:
         print(f"This run is limited to ${run_cap:.2f}.")
@@ -48,13 +48,20 @@ def remaining_budget() -> float:
 
 
 def check_key_expiry() -> None:
+    """Stop quietly (exit 0, so no failure e-mail every 20 minutes) once the
+    cutoff passes. Accepts a date (UTC midnight) or an ISO datetime."""
     expires = os.getenv("LLM_KEY_EXPIRES", "").strip()
-    if expires and date.fromisoformat(expires) <= datetime.now(timezone.utc).date():
-        print(
-            f"LLM key marked as expiring on {expires}. Switch the model/key "
-            "before running again (see NOTES)."
+    if not expires:
+        return
+    if "T" in expires:
+        cutoff = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+    else:
+        cutoff = datetime.combine(
+            date.fromisoformat(expires), datetime.min.time(), tzinfo=timezone.utc
         )
-        sys.exit(1)
+    if datetime.now(timezone.utc) >= cutoff:
+        print(f"LLM key cutoff {expires} has passed. Bot stopped; not forecasting.")
+        sys.exit(0)
 
 
 def record_run(cost_usd: float, n_questions: int, n_errors: int, mode: str) -> None:
