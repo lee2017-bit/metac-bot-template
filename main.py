@@ -41,6 +41,12 @@ from forecasting_tools import (
     structure_output,
 )
 
+from claude_research import run_claude_web_research
+from forecasting_tools import MonetaryCostManager
+from spend_guard import check_key_expiry, record_run, remaining_budget
+
+import os
+
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
@@ -135,7 +141,9 @@ class FallTemplateBot2026(ForecastBot):
 
             prompt = self._get_research_prompt(question, researcher)
 
-            if isinstance(researcher, GeneralLlm):
+            if researcher == "claude-web-search":
+                research = await run_claude_web_research(prompt)
+            elif isinstance(researcher, GeneralLlm):
                 research = await researcher.invoke(prompt)
             elif (
                 researcher == "asknews/news-summaries"
@@ -176,6 +184,7 @@ class FallTemplateBot2026(ForecastBot):
             The superforecaster will give you a question they intend to forecast on.
             To be a great assistant, you generate a concise but detailed rundown of the most relevant news, including if the question would resolve Yes or No based on current information.
             You do not produce forecasts yourself.
+            Today is {datetime.now().strftime("%Y-%m-%d")}. Search the web for the latest information, and include relevant base rates and any scheduled events before the resolution date.
 
             Question:
             {question.question_text}
@@ -697,35 +706,48 @@ if __name__ == "__main__":
         default="tournament",
         help="What to forecast on (default: tournament)",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Forecast but do not publish anything to Metaculus",
+    )
     args = parser.parse_args()
     run_mode: Literal["tournament", "metaculus_cup", "test_questions"] = args.mode
 
     check_environment(strict=True)
-    publish_to_metaculus = True
+    check_key_expiry()
+    budget_left_usd = remaining_budget()
+    publish_to_metaculus = not args.dry_run
     print_startup_banner(run_mode, will_publish=publish_to_metaculus)
 
     # Configure the bot. The `llms=` block below is commented out to use
     # whichever default models forecasting-tools picks based on your env vars;
     # uncomment and edit to pin specific models.
+    # Models are pinned explicitly (forecasting-tools otherwise picks them by
+    # which keys exist, not by which keys work). Claude 5.5 models take no
+    # temperature, so it is None everywhere.
+    FORECAST_MODEL = os.getenv("FORECAST_MODEL", "anthropic/claude-opus-5-5")
+    PARSER_MODEL = os.getenv("PARSER_MODEL", "anthropic/claude-haiku-5-5")
     template_bot = FallTemplateBot2026(
         research_reports_per_question=1,
-        predictions_per_research_report=5,
+        predictions_per_research_report=int(os.getenv("PREDICTIONS_PER_QUESTION", "3")),
         use_research_summary_to_forecast=False,
         publish_reports_to_metaculus=publish_to_metaculus,
-        folder_to_save_reports_to=None,
+        folder_to_save_reports_to="reports",
         skip_previously_forecasted_questions=True,
         extra_metadata_in_explanation=True,
-        # llms={
-        #     "default": GeneralLlm(
-        #         model="openrouter/openai/gpt-4o",
-        #         temperature=0.3,
-        #         timeout=40,
-        #         allowed_tries=2,
-        #     ),
-        #     "summarizer": "openai/gpt-4o-mini",
-        #     "researcher": "asknews/news-summaries",
-        #     "parser": "openai/gpt-4o-mini",
-        # },
+        llms={
+            "default": GeneralLlm(
+                model=FORECAST_MODEL,
+                temperature=None,
+                timeout=300,
+                allowed_tries=2,
+                max_tokens=16000,
+            ),
+            "summarizer": GeneralLlm(model=PARSER_MODEL, temperature=None),
+            "researcher": os.getenv("RESEARCHER", "claude-web-search"),
+            "parser": GeneralLlm(model=PARSER_MODEL, temperature=None),
+        },
     )
 
     # Per-mode tournament URL shown in the summary banner footer. These
@@ -741,6 +763,18 @@ if __name__ == "__main__":
     # exceptions, since return_exceptions=True) which then flows into the
     # summary printers below.
     client = MetaculusClient()
+    run_cost_manager = MonetaryCostManager(hard_limit=budget_left_usd)
+    run_cost_manager.__enter__()
+    # Record spend even if the run crashes part-way.
+    import atexit
+
+    _recorded = {"done": False}
+
+    def _record_on_exit() -> None:
+        if not _recorded["done"]:
+            record_run(run_cost_manager.current_usage, 0, -1, run_mode + " (crashed)")
+
+    atexit.register(_record_on_exit)
     if run_mode == "tournament":
         seasonal_tournament_reports = asyncio.run(
             template_bot.forecast_on_tournament(
@@ -775,6 +809,15 @@ if __name__ == "__main__":
             )
         )
 
+    run_cost_manager.__exit__(None, None, None)
+    n_errors = sum(1 for r in forecast_reports if isinstance(r, BaseException))
+    record_run(
+        run_cost_manager.current_usage,
+        len(forecast_reports),
+        n_errors,
+        run_mode + (" (dry run)" if args.dry_run else ""),
+    )
+    _recorded["done"] = True
     template_bot.log_report_summary(forecast_reports)
     print_run_summary_banner(
         forecast_reports,

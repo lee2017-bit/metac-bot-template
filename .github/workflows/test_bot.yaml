@@ -3,18 +3,20 @@ name: Test Bot
 on:
   workflow_dispatch:
 
-# Add concurrency group to prevent parallel runs
+# One run at a time, shared by the test and tournament workflows, so the
+# spend ledger is never written by two runs at once.
 concurrency:
-  group: ${{ github.workflow }}
+  group: forecast-bot
   cancel-in-progress: false
 
+permissions:
+  contents: read
 
-# Daily job to run the simple forecast bot
 jobs:
   forecast_job:
-    runs-on: ubuntu-latest # determines the machine that will run the job - keep as is
-    steps: # sets up the steps that will be run in order
-      # setup repository with all necessary dependencies - keep as is
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
       - name: Check out repository
         uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -26,17 +28,43 @@ jobs:
           version: "0.13.1"
       - name: Install dependencies
         run: uv sync --locked
+      - name: Restore spend ledger
+        uses: actions/cache/restore@v4
+        with:
+          path: spend
+          key: spend-ledger-${{ github.run_id }}
+          restore-keys: spend-ledger-
       - name: Run bot
-        run: |
-          uv run python main.py --mode test_questions
-        # this reads the environment variables from the github repository.
-        # Store under Settings --> Secrets and variables --> Actions
+        run: uv run python main.py --mode test_questions
         env:
-          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }} # replace this with the name of the variable under which you stored your own Metaculus token
-          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
-          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
-          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          # Spend cap across all runs (USD) and the date the Claude credit expires.
+          SPEND_CAP_USD: "50"
+          RUN_CAP_USD: "4"
+          LLM_KEY_EXPIRES: "2026-11-28"
+          FORECAST_MODEL: anthropic/claude-opus-5-5
+          PARSER_MODEL: anthropic/claude-haiku-5-5
+          RESEARCHER: claude-web-search
+          RESEARCH_MODEL: claude-sonnet-5-5
+          PREDICTIONS_PER_QUESTION: "3"
+      - name: Show spend
+        if: always()
+        run: |
+          if [ -f spend/ledger.json ]; then
+            python -c "import json;d=json.load(open('spend/ledger.json'));print('total',d['total_usd']);print(d['runs'][-1])" | tee -a $GITHUB_STEP_SUMMARY
+          fi
+      - name: Save spend ledger
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: spend
+          key: spend-ledger-${{ github.run_id }}
+      - name: Keep reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 90
