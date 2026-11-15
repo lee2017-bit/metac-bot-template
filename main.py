@@ -52,6 +52,24 @@ dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+# Evidence-handling rules adapted from the owner's KIC sourcing agent
+# (resolution-source alignment, dated facts, cross-checks, claims vs actions,
+# "unknown" instead of guessing). Kept on one line so clean_indents is unaffected.
+RESEARCH_RULES = (
+    "Also: (1) identify the exact source or data series the question resolves on, its latest released value, "
+    "and when the next release before the resolution date is scheduled; (2) give the publication date of every key fact "
+    "and say if it may be stale; (3) cross-check any number that matters against a second independent source and note "
+    "disagreements; (4) separate announcements, targets and plans from actions already completed, and note how often "
+    "similar announced plans have slipped; (5) list what you could not find instead of guessing."
+)
+FORECAST_RULES = (
+    "Evidence discipline: re-read the resolution criteria and fine print for edge cases (exact dates, time zones, "
+    "definitions, which source counts); weigh announcements and plans less than completed actions; prefer the most "
+    "recent dated facts; where the research has no evidence on a point, treat it as unknown and lean toward the base "
+    "rate rather than an extreme."
+)
+
+
 class FallTemplateBot2026(ForecastBot):
     """
     This is the template bot for the Fall 2026 FutureEval Bot Tournament.
@@ -206,7 +224,7 @@ class FallTemplateBot2026(ForecastBot):
             The superforecaster will give you a question they intend to forecast on.
             To be a great assistant, you generate a concise but detailed rundown of the most relevant news, including if the question would resolve Yes or No based on current information.
             You do not produce forecasts yourself.
-            Today is {datetime.now().strftime("%Y-%m-%d")}. Search the web for the latest information, and include relevant base rates and any scheduled events before the resolution date.
+            Today is {datetime.now().strftime("%Y-%m-%d")}. Search the web for the latest information, and include relevant base rates and any scheduled events before the resolution date. {RESEARCH_RULES}
 
             Question:
             {question.question_text}
@@ -245,6 +263,8 @@ class FallTemplateBot2026(ForecastBot):
             {research}
 
             Today is {datetime.now().strftime("%Y-%m-%d")}.
+
+            {FORECAST_RULES}
 
             Before answering you write:
             (a) The time left until the outcome to the question is known.
@@ -315,6 +335,8 @@ class FallTemplateBot2026(ForecastBot):
             {research}
 
             Today is {datetime.now().strftime("%Y-%m-%d")}.
+
+            {FORECAST_RULES}
 
             Before answering you write:
             (a) The time left until the outcome to the question is known.
@@ -401,6 +423,8 @@ class FallTemplateBot2026(ForecastBot):
             - Please notice the units requested and give your answer in these units (e.g. whether you represent a number as 1,000,000 or 1 million).
             - Never use scientific notation.
             - Always start with a smaller number (more negative if negative) and then increase from there. The value for percentile 10 should always be less than the value for percentile 20, and so on.
+
+            {FORECAST_RULES}
 
             Before answering you write:
             (a) The time left until the outcome to the question is known.
@@ -496,6 +520,8 @@ class FallTemplateBot2026(ForecastBot):
             - The dates must be written in the format of YYYY-MM-DD. If hours matter, please append the date with the hour in UTC and military time: YYYY-MM-DDTHH:MM:SSZ. No other formatting is allowed.
             - Always start with a lower date chronologically and then increase from there.
             - Do NOT forget this. The dates must be written in chronological order starting at the earliest time at percentile 10 and increasing from there.
+
+            {FORECAST_RULES}
 
             Before answering you write:
             (a) The time left until the outcome to the question is known.
