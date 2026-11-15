@@ -1,0 +1,88 @@
+name: Forecast loop (self-restarting)
+
+# Backup for the 20-minute schedule, which GitHub was not firing on this fork.
+# One job checks for new questions every 15 minutes for ~5.5 hours, then
+# starts the next job itself. It stops chaining after LLM_KEY_EXPIRES.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: forecast-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write   # only to start the next loop job
+
+jobs:
+  loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      SPEND_CAP_USD: "100"
+      RUN_CAP_USD: "15"
+      LLM_KEY_EXPIRES: "2026-11-27T15:00:00Z" # = 11/28 00:00 KST
+      FORECAST_ENSEMBLE: "claude-fable-5-2:2,claude-opus-5-5:3"
+      FORECAST_EFFORT: high
+      PARSER_MODEL: anthropic/claude-haiku-5-5
+      RESEARCHER: claude-web-search
+      RESEARCH_MODEL: claude-opus-5-5
+      RESEARCH_EFFORT: medium
+      RESEARCH_MAX_SEARCHES: "6"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: "0.13.1"
+      - run: uv sync --locked
+      - name: Restore spend ledger
+        uses: actions/cache/restore@v4
+        with:
+          path: spend
+          key: spend-ledger-${{ github.run_id }}
+          restore-keys: spend-ledger-
+      - name: Forecast every 15 minutes
+        run: |
+          end=$(( $(date +%s) + 330*60 ))
+          while [ $(date +%s) -lt $end ]; do
+            echo "=== check at $(date -u +%FT%TZ) ==="
+            uv run python main.py || echo "run failed (exit $?)"
+            [ -f spend/ledger.json ] && python -c "import json;d=json.load(open('spend/ledger.json'));print('total',d['total_usd'],d['runs'][-1])"
+            now=$(date +%s); [ $((now + 15*60)) -ge $end ] && break
+            sleep 900
+          done
+      - name: Show spend
+        if: always()
+        run: |
+          if [ -f spend/ledger.json ]; then
+            python -c "import json;d=json.load(open('spend/ledger.json'));print('total',d['total_usd']);print(d['runs'][-1])" | tee -a $GITHUB_STEP_SUMMARY
+          fi
+      - name: Save spend ledger
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: spend
+          key: spend-ledger-${{ github.run_id }}
+      - name: Keep reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 90
+      - name: Start next loop job
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if python -c "import datetime as d,os,sys;sys.exit(0 if d.datetime.now(d.timezone.utc)<d.datetime.fromisoformat(os.environ['LLM_KEY_EXPIRES'].replace('Z','+00:00')) else 1)"; then
+            gh workflow run bot_loop.yaml --ref main
+          else
+            echo "Past cutoff; not restarting."
+          fi
