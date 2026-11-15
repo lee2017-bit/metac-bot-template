@@ -21,9 +21,11 @@ logger = logging.getLogger(__name__)
 
 RESEARCH_MODEL = os.getenv("RESEARCH_MODEL", "claude-sonnet-5-5")
 MAX_SEARCHES = int(os.getenv("RESEARCH_MAX_SEARCHES", "4"))
+RESEARCH_EFFORT = os.getenv("RESEARCH_EFFORT", "low")
 
 # USD per token (input, output). Web search: $10 per 1000 searches.
 _PRICES = {
+    "claude-fable-5-2": (8e-6, 40e-6),
     "claude-opus-5-5": (4e-6, 20e-6),
     "claude-sonnet-5-5": (2e-6, 10e-6),
     "claude-haiku-5-5": (0.1e-6, 0.5e-6),
@@ -75,7 +77,7 @@ async def run_claude_web_research(prompt: str) -> str:
         async with client.messages.stream(
             model=RESEARCH_MODEL,
             max_tokens=16000,
-            output_config={"effort": "low"},
+            output_config={"effort": RESEARCH_EFFORT},
             tools=tools,
             messages=messages,
         ) as stream:

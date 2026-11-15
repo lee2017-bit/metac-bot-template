@@ -15,7 +15,7 @@ permissions:
 jobs:
   forecast_job:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -41,13 +41,16 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # Spend cap across all runs (USD) and the date the Claude credit expires.
           SPEND_CAP_USD: "100"
-          RUN_CAP_USD: "4"
+          RUN_CAP_USD: "15"
           LLM_KEY_EXPIRES: "2026-11-27T15:00:00Z" # = 11/28 00:00 KST
-          FORECAST_MODEL: anthropic/claude-opus-5-5
+          # 5 forecasts per question: 2 x Fable 5.2 + 3 x Opus 5.5, high effort.
+          FORECAST_ENSEMBLE: "claude-fable-5-2:2,claude-opus-5-5:3"
+          FORECAST_EFFORT: high
           PARSER_MODEL: anthropic/claude-haiku-5-5
           RESEARCHER: claude-web-search
-          RESEARCH_MODEL: claude-sonnet-5-5
-          PREDICTIONS_PER_QUESTION: "3"
+          RESEARCH_MODEL: claude-opus-5-5
+          RESEARCH_EFFORT: medium
+          RESEARCH_MAX_SEARCHES: "6"
       - name: Show spend
         if: always()
         run: |

@@ -41,6 +41,7 @@ from forecasting_tools import (
     structure_output,
 )
 
+from claude_llm import ClaudeForecastLlm, current_model, parse_ensemble
 from claude_research import run_claude_web_research
 from forecasting_tools import MonetaryCostManager
 from spend_guard import check_key_expiry, record_run, remaining_budget
@@ -127,10 +128,31 @@ class FallTemplateBot2026(ForecastBot):
     """
 
     _max_concurrent_questions = (
-        1  # Set this to whatever works for your search-provider/ai-model rate limits
+        3  # Set this to whatever works for your search-provider/ai-model rate limits
     )
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
     _structure_output_validation_samples = 2
+
+    ##################################### ENSEMBLE #####################################
+
+    # Models used for the N predictions of one question, in order
+    # (e.g. 2 Fable + 3 Opus). Set from FORECAST_ENSEMBLE in __main__.
+    ensemble_models: list[str] = []
+    _ensemble_counter: dict = {}
+
+    async def _make_prediction(self, question, research):
+        if not self.ensemble_models:
+            return await super()._make_prediction(question, research)
+        key = question.page_url or id(question)
+        # Read and bump without awaiting in between, so concurrent predictions
+        # for the same question get different models.
+        i = self._ensemble_counter.get(key, 0)
+        self._ensemble_counter[key] = i + 1
+        token = current_model.set(self.ensemble_models[i % len(self.ensemble_models)])
+        try:
+            return await super()._make_prediction(question, research)
+        finally:
+            current_model.reset(token)
 
     ##################################### RESEARCH #####################################
 
@@ -726,24 +748,22 @@ if __name__ == "__main__":
     # Models are pinned explicitly (forecasting-tools otherwise picks them by
     # which keys exist, not by which keys work). Claude 5.5 models take no
     # temperature, so it is None everywhere.
-    FORECAST_MODEL = os.getenv("FORECAST_MODEL", "anthropic/claude-opus-5-5")
+    ENSEMBLE = parse_ensemble(
+        os.getenv("FORECAST_ENSEMBLE", "claude-fable-5-2:2,claude-opus-5-5:3")
+    )
+    FORECAST_EFFORT = os.getenv("FORECAST_EFFORT", "high")
     PARSER_MODEL = os.getenv("PARSER_MODEL", "anthropic/claude-haiku-5-5")
+    FallTemplateBot2026.ensemble_models = ENSEMBLE
     template_bot = FallTemplateBot2026(
         research_reports_per_question=1,
-        predictions_per_research_report=int(os.getenv("PREDICTIONS_PER_QUESTION", "3")),
+        predictions_per_research_report=len(ENSEMBLE),
         use_research_summary_to_forecast=False,
         publish_reports_to_metaculus=publish_to_metaculus,
         folder_to_save_reports_to="reports",
         skip_previously_forecasted_questions=True,
         extra_metadata_in_explanation=True,
         llms={
-            "default": GeneralLlm(
-                model=FORECAST_MODEL,
-                temperature=None,
-                timeout=300,
-                allowed_tries=2,
-                max_tokens=16000,
-            ),
+            "default": ClaudeForecastLlm(ENSEMBLE[0], effort=FORECAST_EFFORT),
             "summarizer": GeneralLlm(model=PARSER_MODEL, temperature=None),
             "researcher": os.getenv("RESEARCHER", "claude-web-search"),
             "parser": GeneralLlm(model=PARSER_MODEL, temperature=None),
