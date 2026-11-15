@@ -504,6 +504,18 @@ class FallTemplateBot2026(ForecastBot):
         template in all but the most overconfident closed-bound case.
         """
         core = [p for p in percentile_list if 0.1 - 1e-9 <= p.percentile <= 0.9 + 1e-9]
+        # The library rejects values more than 2x the question range beyond a
+        # bound; pull such extreme tails in just inside that limit.
+        span = question.upper_bound - question.lower_bound
+        lo, hi = question.lower_bound - 1.9 * span, question.upper_bound + 1.9 * span
+        clamped, last = [], None
+        for p in sorted(percentile_list, key=lambda x: x.percentile):
+            v = min(max(p.value, lo), hi)
+            if last is not None and v <= last:
+                v = last + 1e-9 * max(span, 1)
+            clamped.append(Percentile(percentile=p.percentile, value=v))
+            last = v
+        percentile_list = clamped
         try:
             full = NumericDistribution.from_question(percentile_list, question)
             if len(core) < 2 or len(core) == len(percentile_list):
