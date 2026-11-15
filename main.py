@@ -422,7 +422,7 @@ class FallTemplateBot2026(ForecastBot):
             Formatting Instructions:
             - Please notice the units requested and give your answer in these units (e.g. whether you represent a number as 1,000,000 or 1 million).
             - Never use scientific notation.
-            - Always start with a smaller number (more negative if negative) and then increase from there. The value for percentile 10 should always be less than the value for percentile 20, and so on.
+            - Always start with a smaller number (more negative if negative) and then increase from there. The value for percentile 1 should always be less than the value for percentile 5, and so on.
 
             {FORECAST_RULES}
 
@@ -435,16 +435,20 @@ class FallTemplateBot2026(ForecastBot):
             (f) A brief description of an unexpected scenario that results in a high outcome.
 
             {self._get_conditional_disclaimer_if_necessary(question)}
-            You remind yourself that good forecasters are humble and set wide 90/10 confidence intervals to account for unknown unknowns.
+            You remind yourself that good forecasters are humble and set wide 90/10 confidence intervals to account for unknown unknowns. Your percentile 1 and 99 values are genuinely extreme but still possible outcomes, not the edges of the question's range.
 
             The last thing you write is your final answer as:
             "
-            Percentile 10: XX (lowest number value)
+            Percentile 1: XX (lowest number value)
+            Percentile 5: XX
+            Percentile 10: XX
             Percentile 20: XX
             Percentile 40: XX
             Percentile 60: XX
             Percentile 80: XX
-            Percentile 90: XX (highest number value)
+            Percentile 90: XX
+            Percentile 95: XX
+            Percentile 99: XX (highest number value)
             "
             """
         )
@@ -479,11 +483,43 @@ class FallTemplateBot2026(ForecastBot):
             additional_instructions=parsing_instructions,
             num_validation_samples=self._structure_output_validation_samples,
         )
-        prediction = NumericDistribution.from_question(percentile_list, question)
+        prediction = self._tail_mixture_distribution(percentile_list, question)
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {prediction.declared_percentiles}."
         )
         return ReasonedPrediction(prediction_value=prediction, reasoning=reasoning)
+
+    @staticmethod
+    def _tail_mixture_distribution(
+        percentile_list: list[Percentile], question: NumericQuestion
+    ) -> NumericDistribution:
+        """
+        With only percentiles 10..90, the library puts the 5th/95th percentile
+        exactly at the question bounds, i.e. 5% of the mass below the lower
+        bound and 5% above the upper bound however far away they are. Here the
+        model also gives 1/5/95/99, and the final CDF is 80% the full-tail CDF
+        + 20% the 10..90-only CDF (a safety net if the stated tails are too
+        narrow). In simulation (t-distributed outcomes, open and closed bounds,
+        well-calibrated to 3x overconfident forecasters) this mixture beat the
+        template in all but the most overconfident closed-bound case.
+        """
+        core = [p for p in percentile_list if 0.1 - 1e-9 <= p.percentile <= 0.9 + 1e-9]
+        try:
+            full = NumericDistribution.from_question(percentile_list, question)
+            if len(core) < 2 or len(core) == len(percentile_list):
+                return full
+            core_dist = NumericDistribution.from_question(core, question)
+            full_cdf, core_cdf = full.get_cdf(), core_dist.get_cdf()
+            mixed = [
+                Percentile(
+                    value=a.value, percentile=0.8 * a.percentile + 0.2 * b.percentile
+                )
+                for a, b in zip(full_cdf, core_cdf)
+            ]
+            return NumericDistribution.from_question(mixed, question)
+        except Exception as e:  # fall back to the template behaviour
+            logger.warning(f"Tail mixture failed ({e}); using 10..90 percentiles only")
+            return NumericDistribution.from_question(core or percentile_list, question)
 
     ##################################### DATE QUESTIONS #####################################
 
