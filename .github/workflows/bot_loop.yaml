@@ -1,7 +1,7 @@
 name: Forecast loop (self-restarting)
 
 # Backup for the 20-minute schedule, which GitHub was not firing on this fork.
-# One job checks for new questions every 15 minutes for ~5.5 hours, then
+# One job checks for new questions every 15 minutes for ~55 minutes, then
 # starts the next job itself. It stops chaining after LLM_KEY_EXPIRES.
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ permissions:
 jobs:
   loop:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 120
     env:
       METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -48,12 +48,12 @@ jobs:
           restore-keys: spend-ledger-
       - name: Forecast every 15 minutes
         run: |
-          end=$(( $(date +%s) + 330*60 ))
+          end=$(( $(date +%s) + 55*60 ))
           while [ $(date +%s) -lt $end ]; do
             echo "=== check at $(date -u +%FT%TZ) ==="
             uv run python main.py || echo "run failed (exit $?)"
             [ -f spend/ledger.json ] && python -c "import json;d=json.load(open('spend/ledger.json'));print('total',d['total_usd'],d['runs'][-1])"
-            now=$(date +%s); [ $((now + 15*60)) -ge $end ] && break
+            now=$(date +%s); [ $((now + 15*60)) -gt $end ] && break
             sleep 900
           done
       - name: Show spend
