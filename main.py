@@ -66,7 +66,9 @@ FORECAST_RULES = (
     "Evidence discipline: re-read the resolution criteria and fine print for edge cases (exact dates, time zones, "
     "definitions, which source counts); weigh announcements and plans less than completed actions; prefer the most "
     "recent dated facts; where the research has no evidence on a point, treat it as unknown and lean toward the base "
-    "rate rather than an extreme."
+    "rate rather than an extreme. If current betting odds or prediction-market prices exist for the event, convert "
+    "them to implied probabilities (removing the bookmaker margin) and use them as your anchor, departing from them "
+    "only for a specific reason the market is unlikely to have priced."
 )
 
 
