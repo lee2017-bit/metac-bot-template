@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 RESEARCH_MODEL = os.getenv("RESEARCH_MODEL", "claude-sonnet-5-5")
 MAX_SEARCHES = int(os.getenv("RESEARCH_MAX_SEARCHES", "4"))
 RESEARCH_EFFORT = os.getenv("RESEARCH_EFFORT", "low")
+# The basic search tool. The newer web_search_20260209 runs searches from
+# inside code execution, and in testing the model spent its search budget
+# re-running the same query while debugging the result format (live run on
+# 16 Nov: "only one web search before hitting the usage limit").
+SEARCH_TOOL = os.getenv("RESEARCH_SEARCH_TOOL", "web_search_20250305")
 
 # USD per token (input, output). Web search: $10 per 1000 searches.
 _PRICES = {
@@ -65,7 +70,7 @@ async def run_claude_web_research(prompt: str) -> str:
     messages: list = [{"role": "user", "content": prompt}]
     tools = [
         {
-            "type": "web_search_20260209",
+            "type": SEARCH_TOOL,
             "name": "web_search",
             "max_uses": MAX_SEARCHES,
             "blocked_domains": _BLOCKED_DOMAINS,
