@@ -1,0 +1,25 @@
+name: Tournament probe (read-only)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: probe
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q requests
+      - run: python tools/tournament_probe.py
+        env:
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
