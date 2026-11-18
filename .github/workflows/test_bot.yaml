@@ -41,7 +41,7 @@ jobs:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # Spend cap across all runs (USD) and the date the Claude credit expires.
-          SPEND_CAP_USD: "100"
+          # Bot-only cap. The organisation also has a Console monthly limit of $180 for all          # usage (about $35 of it was spent before the bot existed), so the bot stops          # a little before that limit would start rejecting calls.          SPEND_CAP_USD: "140"
           RUN_CAP_USD: "15"
           LLM_KEY_EXPIRES: "2026-11-27T15:00:00Z" # = 11/28 00:00 KST
           # 5 forecasts per question: 2 x Fable 5.2 + 3 x Opus 5.5, high effort.
@@ -59,7 +59,7 @@ jobs:
           RESEARCH_MAX_FETCHES: "3"
           RESEARCH_MAX_MARKET_LOOKUPS: "2"
           DISCRETE_PER_VALUE_MAX: "35"
-          SPEND_OFFSET_USD: "9.6"
+          SPEND_OFFSET_USD: "22.3" # 9.6 tests outside the ledger + 12.7 gap vs Console on 11/18
       - name: Show spend
         if: always()
         run: |
