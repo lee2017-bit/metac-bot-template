@@ -3,10 +3,11 @@ name: Test Bot
 on:
   workflow_dispatch:
 
-# One run at a time, shared by the test and tournament workflows, so the
-# spend ledger is never written by two runs at once.
+# Own group so a test can run while the forecast loop is running (sharing the
+# loop's group would cancel one of the two). The test therefore does not write
+# the spend ledger; its cost is added to SPEND_OFFSET_USD by hand afterwards.
 concurrency:
-  group: forecast-bot
+  group: forecast-bot-test
   cancel-in-progress: false
 
 permissions:
@@ -49,21 +50,22 @@ jobs:
           PARSER_MODEL: anthropic/claude-haiku-5-5
           RESEARCHER: claude-web-search
           RESEARCH_MODEL: claude-sonnet-5-5
-          RESEARCH_EFFORT: medium
+          RESEARCH_EFFORT: high
           RESEARCH_MAX_SEARCHES: "6"
           RESEARCH_SEARCH_TOOL: web_search_20250305
+          # Upgrades under test: full question context for the researcher, page
+          # reading, prediction-market lookup, per-outcome discrete forecasts.
+          RESEARCH_FULL_CONTEXT: "1"
+          RESEARCH_MAX_FETCHES: "3"
+          RESEARCH_MAX_MARKET_LOOKUPS: "2"
+          DISCRETE_PER_VALUE_MAX: "35"
+          SPEND_OFFSET_USD: "1.6"
       - name: Show spend
         if: always()
         run: |
           if [ -f spend/ledger.json ]; then
             python -c "import json;d=json.load(open('spend/ledger.json'));print('total',d['total_usd']);print(d['runs'][-1])" | tee -a $GITHUB_STEP_SUMMARY
           fi
-      - name: Save spend ledger
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: spend
-          key: spend-ledger-${{ github.run_id }}
       - name: Keep reports
         if: always()
         uses: actions/upload-artifact@v4

@@ -54,6 +54,13 @@ jobs:
           RESEARCH_EFFORT: medium
           RESEARCH_MAX_SEARCHES: "6"
           RESEARCH_SEARCH_TOOL: web_search_20250305
+          # Upgrades (tested on bot-testing-area first; 0 = off).
+          RESEARCH_FULL_CONTEXT: "0"
+          RESEARCH_MAX_FETCHES: "0"
+          RESEARCH_MAX_MARKET_LOOKUPS: "0"
+          DISCRETE_PER_VALUE_MAX: "0"
+          # Spend outside the ledger (local tests, parallel test runs), counted against the cap.
+          SPEND_OFFSET_USD: "1.6"
       - name: Show spend
         if: always()
         run: |

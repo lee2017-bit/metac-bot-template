@@ -34,9 +34,15 @@ def remaining_budget() -> float:
     if cap <= 0:
         print("SPEND_CAP_USD is not set; refusing to run without a cap.")
         sys.exit(1)
-    spent = _load()["total_usd"]
+    # SPEND_OFFSET_USD: spend that is not in the ledger (local tests, test runs
+    # that ran in parallel with the loop), so the cap still covers everything.
+    offset = float(os.getenv("SPEND_OFFSET_USD", "0") or 0)
+    spent = _load()["total_usd"] + offset
     left = cap - spent
-    print(f"Spend so far ${spent:.2f} of cap ${cap:.2f}; ${left:.2f} left.")
+    print(
+        f"Spend so far ${spent:.2f} of cap ${cap:.2f} (ledger ${spent - offset:.2f} + "
+        f"outside ledger ${offset:.2f}); ${left:.2f} left."
+    )
     if left <= 0.5:
         print("Spend cap reached. Not forecasting.")
         sys.exit(0)

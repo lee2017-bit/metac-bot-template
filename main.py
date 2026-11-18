@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -42,11 +43,19 @@ from forecasting_tools import (
 )
 
 from claude_llm import ClaudeForecastLlm, current_model, parse_ensemble
-from claude_research import run_claude_web_research
+from claude_research import MAX_FETCHES, MAX_MARKET_LOOKUPS, run_claude_web_research
+from discrete_values import (
+    MARKER as DISCRETE_MARKER,
+    build_cdf,
+    format_value,
+    outcome_values,
+    parse_outcome_probabilities,
+    step_decimals,
+)
 from forecasting_tools import MonetaryCostManager
-from spend_guard import check_key_expiry, record_run, remaining_budget
-
 import os
+
+from spend_guard import check_key_expiry, record_run, remaining_budget
 
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
@@ -70,6 +79,18 @@ FORECAST_RULES = (
     "them to implied probabilities (removing the bookmaker margin) and use them as your anchor, departing from them "
     "only for a specific reason the market is unlikely to have priced."
 )
+if MAX_MARKET_LOOKUPS > 0:
+    FORECAST_RULES += (
+        " Use a market as an anchor only if its wording, thresholds and dates match this question; where they "
+        "differ, adjust for the difference explicitly."
+    )
+# Discrete questions with at most this many outcomes are forecast as one
+# probability per outcome instead of percentiles (0 = off).
+DISCRETE_PER_VALUE_MAX = int(os.getenv("DISCRETE_PER_VALUE_MAX", "0"))
+# Give the researcher the whole question (type, options, unit, range, dates,
+# background) and the tool rules, instead of the template's question text +
+# resolution criteria only.
+RESEARCH_FULL_CONTEXT = os.getenv("RESEARCH_FULL_CONTEXT", "0") == "1"
 
 
 class FallTemplateBot2026(ForecastBot):
@@ -214,11 +235,111 @@ class FallTemplateBot2026(ForecastBot):
             return research
 
     @staticmethod
+    def _question_shape_for_research(question: MetaculusQuestion) -> str:
+        """Type, options, unit, range and dates, so the researcher knows what exactly is asked."""
+        lines: list[str] = []
+        if isinstance(question, MultipleChoiceQuestion):
+            lines.append(f"Question type: multiple choice. Options: {question.options}")
+        elif isinstance(question, NumericQuestion):
+            unit = question.unit_of_measure or "not stated"
+            low = question.nominal_lower_bound if question.nominal_lower_bound is not None else question.lower_bound
+            high = question.nominal_upper_bound if question.nominal_upper_bound is not None else question.upper_bound
+            kind = "discrete number" if question.cdf_size != 201 else "number"
+            lines.append(
+                f"Question type: {kind}. Unit: {unit}. The question creator expects an answer between {low} and {high} "
+                f"({'values below are possible' if question.open_lower_bound else 'cannot be lower'}; "
+                f"{'values above are possible' if question.open_upper_bound else 'cannot be higher'})."
+            )
+        elif isinstance(question, DateQuestion):
+            lines.append(
+                f"Question type: date, expected between {question.lower_bound.date().isoformat()} and {question.upper_bound.date().isoformat()}."
+            )
+        else:
+            lines.append("Question type: binary (Yes or No).")
+        dates = []
+        for label, value in (
+            ("opened", question.open_time),
+            ("closes to forecasts", question.close_time),
+            ("scheduled to resolve", question.scheduled_resolution_time),
+        ):
+            if value is not None:
+                dates.append(f"{label} {value.strftime('%Y-%m-%d %H:%M UTC')}")
+        if dates:
+            lines.append("Question timeline: " + "; ".join(dates) + ".")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _research_tool_rules(question: MetaculusQuestion) -> str:
+        rules: list[str] = []
+        if MAX_FETCHES > 0:
+            text = " ".join(
+                t or ""
+                for t in (
+                    question.resolution_criteria,
+                    question.fine_print,
+                    question.background_info,
+                    question.question_text,
+                )
+            )
+            urls: list[str] = []
+            for url in re.findall(r"https?://[^\s<>()\[\]\"']+", text):
+                url = url.rstrip(".,;:")
+                if "metaculus.com" not in url.lower() and url not in urls:
+                    urls.append(url)
+            named = (
+                " URLs named in the question (resolution criteria first): " + " , ".join(urls[:6]) + " ."
+                if urls
+                else ""
+            )
+            rules.append(
+                f"Your first step is to open, with web_fetch, the page, dataset or document that decides the outcome or holds "
+                f"its latest published value, when the question names one, and to report the latest figure on it with its date.{named} "
+                f"You have at most {MAX_FETCHES} page reads; spend any left over on the most important sources you find instead of "
+                "relying on search snippets, and say which pages could not be opened."
+            )
+        if MAX_MARKET_LOOKUPS > 0:
+            rules.append(
+                "Call market_search once or twice with short keyword queries to check whether Polymarket, Kalshi or Manifold has "
+                "a market on the same or a closely related event. End your write-up with a section headed 'Prediction markets' "
+                "that gives, for each relevant market, its exact title, current price, close date and how its wording, "
+                "thresholds or dates differ from this question; write 'No relevant market found' if there is none, and leave "
+                "out markets about something else. If you find bookmaker odds, give them with the time they were quoted."
+            )
+        rules.append(
+            "Run several distinct searches before writing: at least one for developments in the past week, one for the "
+            "resolution source or official data, and one for base rates or precedents."
+        )
+        rules.append(
+            "The background below was written when the question was created: if what you find contradicts it, say so "
+            "explicitly and state which figure is current, with dates."
+        )
+        return " ".join(rules)
+
+    @staticmethod
     def _get_research_prompt(
         question: MetaculusQuestion, researcher: str | GeneralLlm
     ) -> str:
         if GeneralLlm.to_model_name(researcher) == "asknews/news-summaries":
             return question.question_text
+
+        if not RESEARCH_FULL_CONTEXT:
+            return clean_indents(
+                f"""
+                You are an assistant to a superforecaster.
+                The superforecaster will give you a question they intend to forecast on.
+                To be a great assistant, you generate a concise but detailed rundown of the most relevant news, including if the question would resolve Yes or No based on current information.
+                You do not produce forecasts yourself.
+                Today is {datetime.now().strftime("%Y-%m-%d")}. Search the web for the latest information, and include relevant base rates and any scheduled events before the resolution date. {RESEARCH_RULES}
+
+                Question:
+                {question.question_text}
+
+                This question's outcome will be determined by the specific criteria below:
+                {question.resolution_criteria}
+
+                {question.fine_print}
+                """
+            )
 
         prompt = clean_indents(
             f"""
@@ -227,9 +348,15 @@ class FallTemplateBot2026(ForecastBot):
             To be a great assistant, you generate a concise but detailed rundown of the most relevant news, including if the question would resolve Yes or No based on current information.
             You do not produce forecasts yourself.
             Today is {datetime.now().strftime("%Y-%m-%d")}. Search the web for the latest information, and include relevant base rates and any scheduled events before the resolution date. {RESEARCH_RULES}
+            {FallTemplateBot2026._research_tool_rules(question)}
 
             Question:
             {question.question_text}
+
+            {FallTemplateBot2026._question_shape_for_research(question)}
+
+            Background:
+            {question.background_info}
 
             This question's outcome will be determined by the specific criteria below:
             {question.resolution_criteria}
@@ -397,6 +524,17 @@ class FallTemplateBot2026(ForecastBot):
         upper_bound_message, lower_bound_message = (
             self._create_upper_and_lower_bound_messages(question)
         )
+        values = self._per_value_outcomes(question)
+        if values is not None:
+            try:
+                return await self._run_forecast_on_discrete_values(
+                    question, research, values, lower_bound_message, upper_bound_message
+                )
+            except Exception as e:  # fall back to the percentile path below
+                logger.warning(
+                    f"Per-outcome forecast failed for {question.page_url} "
+                    f"({type(e).__name__}: {e}); using percentiles instead"
+                )
         prompt = clean_indents(
             f"""
             You are a professional forecaster interviewing for a job.
@@ -488,6 +626,103 @@ class FallTemplateBot2026(ForecastBot):
         prediction = self._tail_mixture_distribution(percentile_list, question)
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {prediction.declared_percentiles}."
+        )
+        return ReasonedPrediction(prediction_value=prediction, reasoning=reasoning)
+
+    @staticmethod
+    def _per_value_outcomes(question: NumericQuestion) -> list[float] | None:
+        """The outcome list if this is a small discrete question, else None."""
+        if DISCRETE_PER_VALUE_MAX <= 0 or question.cdf_size is None:
+            return None
+        n = question.cdf_size - 1
+        if question.cdf_size == 201 or not 2 <= n <= DISCRETE_PER_VALUE_MAX:
+            return None
+        if question.zero_point is not None:
+            return None
+        return outcome_values(question.lower_bound, question.upper_bound, question.cdf_size)
+
+    async def _run_forecast_on_discrete_values(
+        self,
+        question: NumericQuestion,
+        research: str,
+        values: list[float],
+        lower_bound_message: str,
+        upper_bound_message: str,
+    ) -> ReasonedPrediction[NumericDistribution]:
+        step = values[1] - values[0]
+        decimals = step_decimals(step)
+        labels = [format_value(v, decimals) for v in values]
+        unit = question.unit_of_measure if question.unit_of_measure else "Not stated (please infer this)"
+        answer_lines = []
+        if question.open_lower_bound:
+            answer_lines.append(f"Below {labels[0]}: XX%")
+        answer_lines += [f"{label}: XX%" for label in labels]
+        if question.open_upper_bound:
+            answer_lines.append(f"Above {labels[-1]}: XX%")
+        answer_format = "\n".join(answer_lines)
+        prompt = clean_indents(
+            f"""
+            You are a professional forecaster interviewing for a job.
+
+            Your interview question is:
+            {question.question_text}
+
+            Background:
+            {question.background_info}
+
+            {question.resolution_criteria}
+
+            {question.fine_print}
+
+            Units for answer: {unit}
+
+            Your research assistant says:
+            {research}
+
+            Today is {datetime.now().strftime("%Y-%m-%d")}.
+
+            {lower_bound_message}
+            {upper_bound_message}
+
+            The answer is one of a fixed list of outcomes: {", ".join(labels)}. If the true value falls between two listed outcomes it is rounded to the nearest one as the resolution criteria describe.
+
+            {FORECAST_RULES}
+
+            Before answering you write:
+            (a) The time left until the outcome to the question is known.
+            (b) The outcome if nothing changed.
+            (c) The outcome if the current trend continued.
+            (d) The expectations of experts and markets.
+            (e) A brief description of an unexpected scenario that results in a low outcome.
+            (f) A brief description of an unexpected scenario that results in a high outcome.
+            (g) Which listed outcomes are already impossible (for example a running total cannot fall below the level already reached).
+
+            {self._get_conditional_disclaimer_if_necessary(question)}
+            You remind yourself that good forecasters are humble: keep some probability on outcomes on both sides of your central estimate to account for unknown unknowns, but do not spread probability onto outcomes the evidence rules out.
+
+            The last thing you write is the line "{DISCRETE_MARKER}" followed by one line for every outcome, in exactly this format, with probabilities that sum to 100%:
+            "
+            {DISCRETE_MARKER}
+            {answer_format}
+            "
+            """
+        )
+        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
+        inbound, below, above = parse_outcome_probabilities(reasoning, values)
+        cdf = build_cdf(
+            inbound, below, above, question.open_lower_bound, question.open_upper_bound
+        )
+        percentiles = [
+            Percentile(value=question.lower_bound + i * step, percentile=p)
+            for i, p in enumerate(cdf)
+        ]
+        prediction = NumericDistribution.from_question(percentiles, question)
+        prediction.get_cdf()  # build and validate now, so a bad distribution falls back
+        summary = ", ".join(f"{label}: {p * 100:.1f}%" for label, p in zip(labels, inbound))
+        logger.info(
+            f"Forecasted URL {question.page_url} with per-outcome probabilities: {summary} "
+            f"(below {below * 100:.1f}%, above {above * 100:.1f}%)."
         )
         return ReasonedPrediction(prediction_value=prediction, reasoning=reasoning)
 
