@@ -21,7 +21,10 @@ jobs:
     env:
       METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      # Bot-only cap. The organisation also has a Console monthly limit of $180 for all      # usage (about $35 of it was spent before the bot existed), so the bot stops      # a little before that limit would start rejecting calls.      SPEND_CAP_USD: "140"
+      # Bot-only cap. The organisation also has a Console monthly limit of $180 for all
+      # usage (about $35 of it was spent before the bot existed), so the bot stops
+      # a little before that limit would start rejecting calls.
+      SPEND_CAP_USD: "140"
       RUN_CAP_USD: "15"
       LLM_KEY_EXPIRES: "2026-11-27T15:00:00Z" # = 11/28 00:00 KST
       FORECAST_ENSEMBLE: "claude-fable-5-2:2,claude-opus-5-5:3"
