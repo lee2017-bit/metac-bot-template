@@ -52,7 +52,7 @@ dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-# Evidence-handling rules adapted from the owner's KIC sourcing agent
+# Evidence-handling rules for research and forecasting
 # (resolution-source alignment, dated facts, cross-checks, claims vs actions,
 # "unknown" instead of guessing). Kept on one line so clean_indents is unaffected.
 RESEARCH_RULES = (
