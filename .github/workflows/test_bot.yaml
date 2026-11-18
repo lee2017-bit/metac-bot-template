@@ -59,7 +59,7 @@ jobs:
           RESEARCH_MAX_FETCHES: "3"
           RESEARCH_MAX_MARKET_LOOKUPS: "2"
           DISCRETE_PER_VALUE_MAX: "35"
-          SPEND_OFFSET_USD: "1.6"
+          SPEND_OFFSET_USD: "9.6"
       - name: Show spend
         if: always()
         run: |
