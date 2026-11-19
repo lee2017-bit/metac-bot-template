@@ -32,12 +32,16 @@ import requests
 from forecasting_tools import MonetaryCostManager
 
 from market_lookup import search_markets
-from openai_compat import add_cost, cost_of, get_client, price_of
+import openai
+
+from openai_compat import add_cost, cost_of, get_client, price_of, worst_case_cost
 
 logger = logging.getLogger(__name__)
 
 RESEARCH_MODEL = os.getenv("RESEARCH_MODEL_OC", "zai-org/GLM-5.3")
-MAX_TOKENS = int(os.getenv("RESEARCH_MAX_TOKENS_OC", "16000"))  # 8000 ran out while thinking
+# 8000: at 16000 GLM-5.3 sometimes thought for over 10 minutes and timed out.
+MAX_TOKENS = int(os.getenv("RESEARCH_MAX_TOKENS_OC", "8000"))
+CALL_TIMEOUT = float(os.getenv("RESEARCH_CALL_TIMEOUT_OC", "300"))
 MAX_TOOL_CALLS = int(os.getenv("RESEARCH_OC_MAX_TOOL_CALLS", "12"))
 TOOL_LIMITS = {
     "news_search": int(os.getenv("RESEARCH_OC_MAX_NEWS", "4")),
@@ -388,7 +392,8 @@ SYSTEM = (
     "resolution source first if the question names one, search for the latest news, look for base "
     "rates and for a matching prediction market, then write the final report. Give the date of every "
     "fact and say which facts you could not verify. Never invent a figure, a quote or a URL. Your final "
-    "message is the report and must not call a tool."
+    "message is the report and must not call a tool. Think briefly between tool calls: each reply, "
+    "hidden reasoning included, is limited to about 8,000 tokens."
 )
 
 
@@ -431,19 +436,47 @@ async def run_free_research(prompt: str) -> str:
     total = 0.0
     text = ""
     empty_replies = 0
+    told_to_finish = False
     for turn in range(MAX_TOOL_CALLS + 5):
         final_turn = calls >= MAX_TOOL_CALLS or turn >= MAX_TOOL_CALLS + 4
-        if final_turn:
+        if final_turn and not told_to_finish:
+            told_to_finish = True
             messages.append(
                 {"role": "user", "content": "Tool budget used up. Write the final report now from what you have."}
             )
-        response = await client.chat.completions.create(
-            model=RESEARCH_MODEL,
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="none" if final_turn else "auto",
-            max_tokens=MAX_TOKENS,
-        )
+        try:
+            # No automatic retry of a timed-out call: the same request would
+            # most likely think just as long again. Nudge instead (below).
+            response = await client.with_options(
+                timeout=CALL_TIMEOUT, max_retries=0
+            ).chat.completions.create(
+                model=RESEARCH_MODEL,
+                messages=messages,
+                tools=TOOLS,
+                tool_choice="none" if final_turn else "auto",
+                max_tokens=MAX_TOKENS,
+            )
+        except openai.APITimeoutError:
+            cost = worst_case_cost(RESEARCH_MODEL, MAX_TOKENS, sum(len(str(m)) for m in messages))
+            total += cost
+            add_cost(cost)
+            empty_replies += 1
+            logger.warning(f"Research call timed out after {CALL_TIMEOUT:.0f} s (empty reply {empty_replies})")
+            if empty_replies > 2:
+                break
+            messages.append(
+                {"role": "user", "content": "Your last reply took too long. Think briefly. "
+                 + ("Write the final report now." if final_turn else
+                    "Call the tools you need now, or write the final report if you have enough.")}
+            )
+            continue
+        except (openai.APIConnectionError, openai.InternalServerError, openai.RateLimitError) as e:
+            empty_replies += 1
+            logger.warning(f"Research call failed ({type(e).__name__}, attempt {empty_replies}); retrying in 10 s")
+            if empty_replies > 2:
+                break
+            await asyncio.sleep(10)
+            continue
         cost = cost_of(RESEARCH_MODEL, response.usage)
         total += cost
         add_cost(cost)

@@ -80,7 +80,7 @@ jobs:
           SPEND_CAP_USD_OC: "80" # Nebius balance was $128 on 11/19; stays well below it
           RUN_CAP_USD_OC: "8"
           LLM_KEY_EXPIRES_OC: "2026-12-24T00:00:00Z"
-          SPEND_OFFSET_USD_OC: "4.5" # Test Bot runs outside the ledger: 4.49 (11/19 run 5)
+          SPEND_OFFSET_USD_OC: "11.3" # Test Bot runs outside the ledger: 4.49 (run 5) + 5.38 (run 6) + 1.4 timed-out calls at worst case
           LLM_PROVIDER: ${{ inputs.provider }}
       - name: Show spend
         if: always()

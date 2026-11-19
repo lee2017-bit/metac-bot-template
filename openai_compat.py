@@ -76,6 +76,23 @@ def add_cost(cost: float) -> None:
     MonetaryCostManager.increase_current_usage_in_parent_managers(cost)
 
 
+def worst_case_cost(model: str, max_tokens: int, prompt_chars: int) -> float:
+    """A call that timed out returns no token counts but may still be billed:
+    count it as if it had produced max_tokens, so the cap stays on the safe side."""
+    inp, out = price_of(model)
+    return (prompt_chars / 3) * inp + max_tokens * out
+
+
+# Nebius returned at most ~16k output tokens (reasoning included) for Kimi-K3
+# whatever max_tokens asked for; long hidden reasoning then cut the final
+# answer off. Reasoning models partly follow a request to keep it short.
+BREVITY = (
+    "Your whole reply, hidden reasoning included, is limited to about 16,000 tokens. "
+    "Keep your reasoning focused (well under 8,000 tokens) and always finish with the "
+    "final answer in exactly the format the prompt asks for."
+)
+
+
 def parser_llm(model: str) -> GeneralLlm:
     """A GeneralLlm (litellm) on the same OpenAI-compatible endpoint, for the
     library's parsing and summarising calls. The model's price is registered
@@ -101,8 +118,7 @@ class OpenAICompatForecastLlm(GeneralLlm):
     def __init__(
         self,
         default_model: str,
-        # 16000 ran out while thinking on a 16-outcome discrete question.
-        max_tokens: int = int(os.getenv("FORECAST_MAX_TOKENS_OC", "32000")),
+        max_tokens: int = int(os.getenv("FORECAST_MAX_TOKENS_OC", "16000")),
     ) -> None:
         super().__init__(model=f"openai/{default_model}", temperature=None)
         self.default_model = default_model
@@ -112,18 +128,29 @@ class OpenAICompatForecastLlm(GeneralLlm):
         MonetaryCostManager.raise_error_if_limit_would_be_reached()
         model = current_model.get() or self.default_model
         price_of(model)  # fail before spending if the price is unknown
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-        response = await get_client().chat.completions.create(
-            model=model, messages=messages, max_tokens=self.max_tokens
-        )
+        system = f"{system_prompt}\n\n{BREVITY}" if system_prompt else BREVITY
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ]
+        try:
+            response = await get_client().with_options(max_retries=1).chat.completions.create(
+                model=model, messages=messages, max_tokens=self.max_tokens
+            )
+        except openai.APITimeoutError:
+            add_cost(worst_case_cost(model, self.max_tokens, len(prompt)))
+            raise
         cost = cost_of(model, response.usage)
         add_cost(cost)
         choice = response.choices[0]
         text = (choice.message.content or "").strip()
-        if not text:
-            raise RuntimeError(f"{model} returned no text (finish={choice.finish_reason})")
-        logger.info(f"{model} forecast call cost ${cost:.4f}")
+        tokens = getattr(response.usage, "completion_tokens", None)
+        if choice.finish_reason == "length" or not text:
+            # A cut-off reply usually lacks the final answer; drop this one
+            # forecast rather than let the parser guess from a fragment.
+            raise RuntimeError(
+                f"{model} reply cut off or empty (finish={choice.finish_reason}, "
+                f"{tokens} output tokens, {len(text)} chars of text)"
+            )
+        logger.info(f"{model} forecast call cost ${cost:.4f} ({tokens} output tokens)")
         return f"[model: {model}]\n{text}"
