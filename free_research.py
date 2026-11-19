@@ -41,7 +41,10 @@ logger = logging.getLogger(__name__)
 RESEARCH_MODEL = os.getenv("RESEARCH_MODEL_OC", "zai-org/GLM-5.3")
 # 8000: at 16000 GLM-5.3 sometimes thought for over 10 minutes and timed out.
 MAX_TOKENS = int(os.getenv("RESEARCH_MAX_TOKENS_OC", "8000"))
-CALL_TIMEOUT = float(os.getenv("RESEARCH_CALL_TIMEOUT_OC", "300"))
+# Calls normally take ~20 s; GLM-5.3 on Nebius sometimes hangs. After one
+# timeout the rest of that question's research uses the fallback model.
+CALL_TIMEOUT = float(os.getenv("RESEARCH_CALL_TIMEOUT_OC", "150"))
+FALLBACK_MODEL = os.getenv("RESEARCH_FALLBACK_MODEL_OC", "moonshotai/Kimi-K3")
 MAX_TOOL_CALLS = int(os.getenv("RESEARCH_OC_MAX_TOOL_CALLS", "12"))
 TOOL_LIMITS = {
     "news_search": int(os.getenv("RESEARCH_OC_MAX_NEWS", "4")),
@@ -426,7 +429,10 @@ def _assistant_message(msg) -> dict:
 async def run_free_research(prompt: str) -> str:
     MonetaryCostManager.raise_error_if_limit_would_be_reached()
     price_of(RESEARCH_MODEL)
+    price_of(FALLBACK_MODEL)
     client = get_client()
+    model = RESEARCH_MODEL
+    models_used: list[str] = [model]
     messages: list = [
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": prompt},
@@ -450,18 +456,23 @@ async def run_free_research(prompt: str) -> str:
             response = await client.with_options(
                 timeout=CALL_TIMEOUT, max_retries=0
             ).chat.completions.create(
-                model=RESEARCH_MODEL,
+                model=model,
                 messages=messages,
                 tools=TOOLS,
                 tool_choice="none" if final_turn else "auto",
                 max_tokens=MAX_TOKENS,
             )
         except openai.APITimeoutError:
-            cost = worst_case_cost(RESEARCH_MODEL, MAX_TOKENS, sum(len(str(m)) for m in messages))
+            cost = worst_case_cost(model, MAX_TOKENS, sum(len(str(m)) for m in messages))
             total += cost
             add_cost(cost)
             empty_replies += 1
-            logger.warning(f"Research call timed out after {CALL_TIMEOUT:.0f} s (empty reply {empty_replies})")
+            logger.warning(
+                f"Research call to {model} timed out after {CALL_TIMEOUT:.0f} s (empty reply {empty_replies})"
+            )
+            if model != FALLBACK_MODEL:
+                model = FALLBACK_MODEL
+                models_used.append(model)
             if empty_replies > 2:
                 break
             messages.append(
@@ -477,7 +488,7 @@ async def run_free_research(prompt: str) -> str:
                 break
             await asyncio.sleep(10)
             continue
-        cost = cost_of(RESEARCH_MODEL, response.usage)
+        cost = cost_of(model, response.usage)
         total += cost
         add_cost(cost)
         msg = response.choices[0].message
@@ -517,7 +528,7 @@ async def run_free_research(prompt: str) -> str:
             }
         )
     logger.info(
-        f"Research cost ${total:.4f} (model={RESEARCH_MODEL}, tool calls {used}, "
+        f"Research cost ${total:.4f} (models={'->'.join(models_used)}, tool calls {used}, "
         f"empty replies {empty_replies})"
     )
     if not text:
