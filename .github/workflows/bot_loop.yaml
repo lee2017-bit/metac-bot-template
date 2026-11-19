@@ -53,7 +53,7 @@ jobs:
       SPEND_CAP_USD_OC: "80" # Nebius balance was $128 on 11/19; stays well below it
       RUN_CAP_USD_OC: "8"
       LLM_KEY_EXPIRES_OC: "2026-12-24T00:00:00Z"
-      SPEND_OFFSET_USD_OC: "0"
+      SPEND_OFFSET_USD_OC: "4.5" # Test Bot runs outside the ledger: 4.49 (11/19 run 5)
       # The loop keeps restarting itself until this time (LLM_KEY_EXPIRES if empty).
       LOOP_UNTIL: ""
     steps:

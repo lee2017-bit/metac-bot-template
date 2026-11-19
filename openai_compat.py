@@ -98,7 +98,12 @@ def parser_llm(model: str) -> GeneralLlm:
 
 
 class OpenAICompatForecastLlm(GeneralLlm):
-    def __init__(self, default_model: str, max_tokens: int = 16000) -> None:
+    def __init__(
+        self,
+        default_model: str,
+        # 16000 ran out while thinking on a 16-outcome discrete question.
+        max_tokens: int = int(os.getenv("FORECAST_MAX_TOKENS_OC", "32000")),
+    ) -> None:
         super().__init__(model=f"openai/{default_model}", temperature=None)
         self.default_model = default_model
         self.max_tokens = max_tokens

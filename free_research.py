@@ -19,6 +19,8 @@ import json
 import logging
 import os
 import re
+import threading
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from html import unescape
@@ -35,6 +37,7 @@ from openai_compat import add_cost, cost_of, get_client, price_of
 logger = logging.getLogger(__name__)
 
 RESEARCH_MODEL = os.getenv("RESEARCH_MODEL_OC", "zai-org/GLM-5.3")
+MAX_TOKENS = int(os.getenv("RESEARCH_MAX_TOKENS_OC", "16000"))  # 8000 ran out while thinking
 MAX_TOOL_CALLS = int(os.getenv("RESEARCH_OC_MAX_TOOL_CALLS", "12"))
 TOOL_LIMITS = {
     "news_search": int(os.getenv("RESEARCH_OC_MAX_NEWS", "4")),
@@ -60,95 +63,170 @@ def _now() -> str:
 # ----------------------------------------------------------------- tools
 
 
-def news_search_sync(query: str) -> str:
-    query = " ".join(str(query).split())[:200]
-    lines: list[str] = []
-    try:
-        r = requests.get(
-            "https://api.gdeltproject.org/api/v2/doc/doc",
-            params={
-                "query": query,
-                "mode": "ArtList",
-                "maxrecords": 15,
-                "format": "json",
-                "timespan": "1m",
-                "sort": "DateDesc",
-            },
-            headers=_HEADERS,
-            timeout=_TIMEOUT,
-        )
-        data = r.json() if r.ok and r.text.strip().startswith("{") else {}
-        for a in data.get("articles") or []:
-            url = a.get("url") or ""
-            if _blocked(url) or "metaculus" in (a.get("title") or "").lower():
-                continue
-            seen = a.get("seendate") or ""
-            lines.append(
-                f"- {seen[:8]} {a.get('domain')}: {a.get('title')} ({url})"
-            )
-    except Exception as e:
-        logger.info(f"GDELT failed for {query!r}: {type(e).__name__}")
-    source = "GDELT"
-    if not lines:
-        source = "Google News"
+# GDELT allows one request per 5 seconds. Research for several questions runs
+# at once, so requests take numbered slots; one that would wait too long is
+# skipped (Google News still answers).
+_gdelt_lock = threading.Lock()
+_gdelt_next = [0.0]
+
+
+def _gdelt_slot(max_wait: float = 25.0) -> bool:
+    with _gdelt_lock:
+        now = time.monotonic()
+        start = max(now, _gdelt_next[0])
+        if start - now > max_wait:
+            return False
+        _gdelt_next[0] = start + 5.5
+    time.sleep(start - now)
+    return True
+
+
+def _google_news(query: str) -> list[str]:
+    r = requests.get(
+        f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en",
+        headers=_HEADERS,
+        timeout=_TIMEOUT,
+    )
+    root = ET.fromstring(r.content)
+    items = []
+    for item in root.iter("item"):
+        title = item.findtext("title") or ""
+        src = item.findtext("source") or ""
+        if "metaculus" in (title + src).lower():
+            continue
         try:
-            r = requests.get(
-                f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en",
-                headers=_HEADERS,
-                timeout=_TIMEOUT,
-            )
-            root = ET.fromstring(r.content)
-            items = []
-            for item in root.iter("item"):
-                title = item.findtext("title") or ""
-                src = item.findtext("source") or ""
-                if "metaculus" in (title + src).lower():
-                    continue
-                try:
-                    when = parsedate_to_datetime(item.findtext("pubDate") or "")
-                except (TypeError, ValueError):
-                    when = datetime(1970, 1, 1, tzinfo=timezone.utc)
-                items.append((when, f"- {when:%Y-%m-%d} {src}: {title}"))
-            items.sort(key=lambda t: t[0], reverse=True)  # the feed is not in date order
-            lines = [line for _, line in items[:15]]
-        except Exception as e:
-            logger.info(f"Google News RSS failed for {query!r}: {type(e).__name__}")
-    if not lines:
+            when = parsedate_to_datetime(item.findtext("pubDate") or "")
+        except (TypeError, ValueError):
+            when = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        src_el = item.find("source")
+        site = urlparse(src_el.get("url", "")).hostname if src_el is not None else None
+        items.append((when, f"- {when:%Y-%m-%d} {src}{f' ({site})' if site else ''}: {title}"))
+    items.sort(key=lambda t: t[0], reverse=True)  # the feed is not in date order
+    return [line for _, line in items[:12]]
+
+
+def _gdelt(query: str) -> list[str]:
+    if not _gdelt_slot():
+        return []
+    r = requests.get(
+        "https://api.gdeltproject.org/api/v2/doc/doc",
+        params={
+            "query": query,
+            "mode": "ArtList",
+            "maxrecords": 8,
+            "format": "json",
+            "timespan": "1m",
+            "sort": "HybridRel",  # relevance with recency; DateDesc was mostly noise
+        },
+        headers=_HEADERS,
+        timeout=_TIMEOUT,
+    )
+    if not (r.ok and r.text.strip().startswith("{")):
+        # Often 429 on shared IPs (one request per 5 s per IP).
+        logger.info(f"GDELT gave no JSON ({r.status_code})")
+        return []
+    lines = []
+    for a in r.json().get("articles") or []:
+        url = a.get("url") or ""
+        if _blocked(url) or "metaculus" in (a.get("title") or "").lower():
+            continue
+        lines.append(f"- {(a.get('seendate') or '')[:8]} {a.get('domain')}: {a.get('title')} ({url})")
+    return lines
+
+
+def news_search_sync(query: str) -> str:
+    """Google News headlines (relevant, dated, no article links) plus, when
+    GDELT answers, a few articles with links that web_fetch can open."""
+    query = " ".join(str(query).split())[:200]
+    sections = []
+    for name, fn in (("Google News", _google_news), ("GDELT", _gdelt)):
+        try:
+            lines = fn(query)
+        except Exception as e:  # news must never break research
+            logger.info(f"{name} failed for {query!r}: {type(e).__name__}")
+            lines = []
+        if lines:
+            sections.append((name, lines))
+    if not sections:
         return f"No news found for '{query}'."
-    how = (
-        "open a URL with web_fetch to read an article."
-        if source == "GDELT"
-        else "no article links; fetch the publisher's or an official page with web_fetch if you know its URL."
+    out = [f"News search for '{query}' at {_now()}."]
+    for name, lines in sections:
+        hint = (
+            "headlines only, no links; fetch the publisher's or an official page with web_fetch if you know its URL"
+            if name == "Google News"
+            else "articles with links, open one with web_fetch to read it; may include loosely related items"
+        )
+        out.append(f"{name} ({hint}):")
+        out.extend(lines)
+    return "\n".join(out)
+
+
+def _wiki_action_api(query: str) -> list[tuple[str, str]]:
+    r = requests.get(
+        "https://en.wikipedia.org/w/api.php",
+        params={"action": "query", "list": "search", "srsearch": query, "srlimit": 6, "format": "json"},
+        headers=_HEADERS,
+        timeout=_TIMEOUT,
     )
-    return (
-        f"News search ({source}) for '{query}' at {_now()}, newest first. Headlines only: "
-        f"{how}\n" + "\n".join(lines)
+    r.raise_for_status()  # 429 is common on shared IPs
+    return [(h.get("title", ""), h.get("snippet", "")) for h in r.json().get("query", {}).get("search", [])]
+
+
+def _wiki_rest_api(query: str) -> list[tuple[str, str]]:
+    r = requests.get(
+        "https://en.wikipedia.org/w/rest.php/v1/search/page",
+        params={"q": query, "limit": 6},
+        headers=_HEADERS,
+        timeout=_TIMEOUT,
     )
+    r.raise_for_status()
+    return [
+        (pg.get("title", ""), " ".join(x for x in (pg.get("description"), pg.get("excerpt")) if x))
+        for pg in r.json().get("pages", [])
+    ]
+
+
+def _wiki_search_page(query: str) -> list[tuple[str, str]]:
+    # The ordinary search page, which was still answering when both APIs gave 429.
+    r = requests.get(
+        "https://en.wikipedia.org/w/index.php",
+        params={"search": query, "fulltext": "1", "ns0": "1"},
+        headers=_HEADERS,
+        timeout=_TIMEOUT,
+    )
+    r.raise_for_status()
+    hits = []
+    for m in re.finditer(
+        r'<div class="mw-search-result-heading"><a href="/wiki/[^"]+" title="([^"]+)".*?'
+        r'<div class="searchresult">(.*?)</div>',
+        r.text,
+        re.S,
+    ):
+        hits.append((unescape(m.group(1)), m.group(2)))
+        if len(hits) >= 6:
+            break
+    return hits
 
 
 def wiki_search_sync(query: str) -> str:
-    try:
-        r = requests.get(
-            "https://en.wikipedia.org/w/api.php",
-            params={
-                "action": "query",
-                "list": "search",
-                "srsearch": query,
-                "srlimit": 6,
-                "format": "json",
-            },
-            headers=_HEADERS,
-            timeout=_TIMEOUT,
+    hits, error = None, None
+    # Next endpoint whenever one is rate-limited (429 is common on shared IPs).
+    for fn in (_wiki_action_api, _wiki_rest_api, _wiki_search_page):
+        try:
+            hits = fn(query)
+            break
+        except Exception as e:
+            error = e
+    if hits is None:
+        return (
+            f"Wikipedia search failed ({type(error).__name__}). "
+            "web_fetch on https://en.wikipedia.org/wiki/<Article_title> still works."
         )
-        hits = r.json().get("query", {}).get("search", [])
-    except Exception as e:
-        return f"Wikipedia search failed ({type(e).__name__})."
     if not hits:
         return f"No Wikipedia article found for '{query}'."
     out = []
-    for h in hits:
-        title = h.get("title", "")
-        snippet = unescape(re.sub(r"<[^>]+>", "", h.get("snippet", "")))
+    for title, snippet in hits:
+        snippet = unescape(re.sub(r"<[^>]+>", "", snippet or ""))
         out.append(
             f"- {title}: {snippet} (https://en.wikipedia.org/wiki/{quote_plus(title.replace(' ', '_'))})"
         )
@@ -258,7 +336,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "news_search",
-            "description": "Search recent news (last month), newest first. Returns dated headlines with URLs. Use 2-6 keywords; you may search in the local language of the event.",
+            "description": "Search news. Returns dated headlines with their publisher (Google News, no links) and, when available, a few articles with URLs (GDELT, last month). Use 2-6 keywords; you may search in the local language of the event.",
             "parameters": {
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
@@ -352,8 +430,9 @@ async def run_free_research(prompt: str) -> str:
     calls = 0
     total = 0.0
     text = ""
-    for turn in range(MAX_TOOL_CALLS + 3):
-        final_turn = calls >= MAX_TOOL_CALLS or turn >= MAX_TOOL_CALLS + 2
+    empty_replies = 0
+    for turn in range(MAX_TOOL_CALLS + 5):
+        final_turn = calls >= MAX_TOOL_CALLS or turn >= MAX_TOOL_CALLS + 4
         if final_turn:
             messages.append(
                 {"role": "user", "content": "Tool budget used up. Write the final report now from what you have."}
@@ -363,7 +442,7 @@ async def run_free_research(prompt: str) -> str:
             messages=messages,
             tools=TOOLS,
             tool_choice="none" if final_turn else "auto",
-            max_tokens=8000,
+            max_tokens=MAX_TOKENS,
         )
         cost = cost_of(RESEARCH_MODEL, response.usage)
         total += cost
@@ -383,6 +462,34 @@ async def run_free_research(prompt: str) -> str:
                 messages.append({"role": "tool", "tool_call_id": tc_id, "content": content})
             continue
         text = (msg.content or "").strip()
-        break
-    logger.info(f"Research cost ${total:.4f} (model={RESEARCH_MODEL}, tool calls {used})")
+        if text:
+            break
+        # Seen live: the model spent its whole token budget thinking and
+        # returned nothing. Ask again with a nudge rather than hand the
+        # forecasters an empty report.
+        empty_replies += 1
+        logger.warning(
+            f"Research model returned no text (finish={response.choices[0].finish_reason}, "
+            f"empty reply {empty_replies})"
+        )
+        if empty_replies > 2:
+            break
+        messages.append(
+            {
+                "role": "user",
+                "content": "Your last reply was empty: it ran out of tokens while thinking. "
+                "Think briefly. "
+                + ("Write the final report now." if final_turn else
+                   "Call the tools you need now, or write the final report if you have enough."),
+            }
+        )
+    logger.info(
+        f"Research cost ${total:.4f} (model={RESEARCH_MODEL}, tool calls {used}, "
+        f"empty replies {empty_replies})"
+    )
+    if not text:
+        return (
+            "RESEARCH FAILED: the research model returned no report for this question. "
+            "Forecast from the question text and your own knowledge, and say so."
+        )
     return text
