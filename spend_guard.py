@@ -20,12 +20,16 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-LEDGER = Path(os.getenv("SPEND_LEDGER", "spend/ledger.json"))
+def _ledger() -> Path:
+    # Read at call time: main.py points this at a separate ledger when the
+    # bot runs on another provider, so each provider has its own cap.
+    return Path(os.getenv("SPEND_LEDGER", "spend/ledger.json"))
 
 
 def _load() -> dict:
-    if LEDGER.exists():
-        return json.loads(LEDGER.read_text())
+    ledger = _ledger()
+    if ledger.exists():
+        return json.loads(ledger.read_text())
     return {"total_usd": 0.0, "runs": []}
 
 
@@ -83,6 +87,7 @@ def record_run(cost_usd: float, n_questions: int, n_errors: int, mode: str) -> N
         }
     )
     data["runs"] = data["runs"][-500:]
-    LEDGER.parent.mkdir(parents=True, exist_ok=True)
-    LEDGER.write_text(json.dumps(data, indent=1))
+    ledger = _ledger()
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(json.dumps(data, indent=1))
     print(f"Run cost ${cost_usd:.4f}; total ${data['total_usd']:.2f}.")

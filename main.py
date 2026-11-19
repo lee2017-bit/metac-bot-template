@@ -44,6 +44,8 @@ from forecasting_tools import (
 
 from claude_llm import ClaudeForecastLlm, current_model, parse_ensemble
 from claude_research import MAX_FETCHES, MAX_MARKET_LOOKUPS, run_claude_web_research
+from free_research import run_free_research
+from openai_compat import OpenAICompatForecastLlm, parser_llm
 from discrete_values import (
     MARKER as DISCRETE_MARKER,
     build_cdf,
@@ -56,6 +58,22 @@ from forecasting_tools import MonetaryCostManager
 import os
 
 from spend_guard import check_key_expiry, record_run, remaining_budget
+
+
+def _provider() -> str:
+    """'anthropic' or 'openai_compat'. PROVIDER_SWITCH_AT (ISO time) lets the
+    workflow carry both configurations and change provider at a fixed moment,
+    e.g. when one credit expires."""
+    provider = os.getenv("LLM_PROVIDER", "anthropic")
+    switch = os.getenv("PROVIDER_SWITCH_AT", "").strip()
+    if switch:
+        at = datetime.fromisoformat(switch.replace("Z", "+00:00"))
+        if datetime.now(timezone.utc) >= at:
+            provider = os.getenv("LLM_PROVIDER_AFTER_SWITCH", "openai_compat")
+    return provider
+
+
+PROVIDER = _provider()
 
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
@@ -204,7 +222,9 @@ class FallTemplateBot2026(ForecastBot):
 
             prompt = self._get_research_prompt(question, researcher)
 
-            if researcher == "claude-web-search":
+            if researcher == "claude-web-search" and PROVIDER == "openai_compat":
+                research = await run_free_research(prompt)
+            elif researcher == "claude-web-search":
                 research = await run_claude_web_research(prompt)
             elif isinstance(researcher, GeneralLlm):
                 research = await researcher.invoke(prompt)
@@ -1047,6 +1067,20 @@ if __name__ == "__main__":
     args = parser.parse_args()
     run_mode: Literal["tournament", "metaculus_cup", "test_questions"] = args.mode
 
+    if PROVIDER == "openai_compat":
+        # Separate ledger, cap and cutoff for the second provider. A cap left
+        # unset becomes 0 (the guard then refuses to run); a cutoff left unset
+        # keeps the first provider's cutoff (the bot stops there).
+        oc_defaults = {
+            "SPEND_LEDGER": "spend/ledger_oc.json",
+            "SPEND_CAP_USD": "0",
+            "SPEND_OFFSET_USD": "0",
+            "RUN_CAP_USD": "0",
+            "LLM_KEY_EXPIRES": os.getenv("LLM_KEY_EXPIRES", ""),
+        }
+        for name, default in oc_defaults.items():
+            os.environ[name] = os.getenv(name + "_OC", default)
+    print(f"LLM provider: {PROVIDER}")
     check_environment(strict=True)
     check_key_expiry()
     budget_left_usd = remaining_budget()
@@ -1059,11 +1093,18 @@ if __name__ == "__main__":
     # Models are pinned explicitly (forecasting-tools otherwise picks them by
     # which keys exist, not by which keys work). Claude 5.5 models take no
     # temperature, so it is None everywhere.
-    ENSEMBLE = parse_ensemble(
-        os.getenv("FORECAST_ENSEMBLE", "claude-fable-5-2:2,claude-opus-5-5:3")
-    )
-    FORECAST_EFFORT = os.getenv("FORECAST_EFFORT", "high")
-    PARSER_MODEL = os.getenv("PARSER_MODEL", "anthropic/claude-haiku-5-5")
+    if PROVIDER == "openai_compat":
+        ENSEMBLE = parse_ensemble(os.getenv("FORECAST_ENSEMBLE_OC", "moonshotai/Kimi-K3:3"))
+        default_llm = OpenAICompatForecastLlm(ENSEMBLE[0])
+        parser = parser_llm(os.getenv("PARSER_MODEL_OC", "zai-org/GLM-5.3-Flash"))
+    else:
+        ENSEMBLE = parse_ensemble(
+            os.getenv("FORECAST_ENSEMBLE", "claude-fable-5-2:2,claude-opus-5-5:3")
+        )
+        FORECAST_EFFORT = os.getenv("FORECAST_EFFORT", "high")
+        PARSER_MODEL = os.getenv("PARSER_MODEL", "anthropic/claude-haiku-5-5")
+        default_llm = ClaudeForecastLlm(ENSEMBLE[0], effort=FORECAST_EFFORT)
+        parser = GeneralLlm(model=PARSER_MODEL, temperature=None)
     FallTemplateBot2026.ensemble_models = ENSEMBLE
     template_bot = FallTemplateBot2026(
         research_reports_per_question=1,
@@ -1074,10 +1115,10 @@ if __name__ == "__main__":
         skip_previously_forecasted_questions=True,
         extra_metadata_in_explanation=True,
         llms={
-            "default": ClaudeForecastLlm(ENSEMBLE[0], effort=FORECAST_EFFORT),
-            "summarizer": GeneralLlm(model=PARSER_MODEL, temperature=None),
+            "default": default_llm,
+            "summarizer": parser,
             "researcher": os.getenv("RESEARCHER", "claude-web-search"),
-            "parser": GeneralLlm(model=PARSER_MODEL, temperature=None),
+            "parser": parser,
         },
     )
 

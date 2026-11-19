@@ -42,6 +42,20 @@ jobs:
       DISCRETE_PER_VALUE_MAX: "35"
       # Spend outside the ledger (local tests, parallel test runs), counted against the cap.
       SPEND_OFFSET_USD: "22.3" # 9.6 tests outside the ledger + 12.7 gap vs Console on 11/18
+      # Second provider (Nebius Token Factory, OpenAI-compatible) for after the Claude
+      # credit ends. Inactive while PROVIDER_SWITCH_AT is empty; set it (and LOOP_UNTIL)
+      # only after a Test Bot run on this provider has passed. Own ledger, cap and cutoff.
+      NEBIUS_API_KEY: ${{ secrets.NEBIUS_API_KEY }}
+      PROVIDER_SWITCH_AT: ""
+      FORECAST_ENSEMBLE_OC: "moonshotai/Kimi-K3:3"
+      RESEARCH_MODEL_OC: zai-org/GLM-5.3
+      PARSER_MODEL_OC: zai-org/GLM-5.3-Flash
+      SPEND_CAP_USD_OC: "80" # Nebius balance was $128 on 11/19; stays well below it
+      RUN_CAP_USD_OC: "8"
+      LLM_KEY_EXPIRES_OC: "2026-12-24T00:00:00Z"
+      SPEND_OFFSET_USD_OC: "0"
+      # The loop keeps restarting itself until this time (LLM_KEY_EXPIRES if empty).
+      LOOP_UNTIL: ""
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -63,16 +77,16 @@ jobs:
           while [ $(date +%s) -lt $end ]; do
             echo "=== check at $(date -u +%FT%TZ) ==="
             uv run python main.py || echo "run failed (exit $?)"
-            [ -f spend/ledger.json ] && python -c "import json;d=json.load(open('spend/ledger.json'));print('total',d['total_usd'],d['runs'][-1])"
+            for f in spend/ledger*.json; do [ -f "$f" ] || continue; python -c "import json,sys;d=json.load(open(sys.argv[1]));print(sys.argv[1],'total',d['total_usd'],d['runs'][-1])" "$f"; done
             now=$(date +%s); [ $((now + 15*60)) -gt $end ] && break
             sleep 900
           done
       - name: Show spend
         if: always()
         run: |
-          if [ -f spend/ledger.json ]; then
-            python -c "import json;d=json.load(open('spend/ledger.json'));print('total',d['total_usd']);print(d['runs'][-1])" | tee -a $GITHUB_STEP_SUMMARY
-          fi
+          for f in spend/ledger*.json; do
+            [ -f "$f" ] || continue; python -c "import json,sys;d=json.load(open(sys.argv[1]));print(sys.argv[1],'total',d['total_usd']);print(d['runs'][-1])" "$f" | tee -a $GITHUB_STEP_SUMMARY
+          done
       - name: Save spend ledger
         if: always()
         uses: actions/cache/save@v4
@@ -92,7 +106,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if python -c "import datetime as d,os,sys;sys.exit(0 if d.datetime.now(d.timezone.utc)<d.datetime.fromisoformat(os.environ['LLM_KEY_EXPIRES'].replace('Z','+00:00')) else 1)"; then
+          if python -c "import datetime as d,os,sys;sys.exit(0 if d.datetime.now(d.timezone.utc)<d.datetime.fromisoformat((os.environ.get('LOOP_UNTIL') or os.environ['LLM_KEY_EXPIRES']).replace('Z','+00:00')) else 1)"; then
             gh workflow run bot_loop.yaml --ref main
           else
             echo "Past cutoff; not restarting."
