@@ -43,10 +43,10 @@ jobs:
       # Spend outside the ledger (local tests, parallel test runs), counted against the cap.
       SPEND_OFFSET_USD: "22.3" # 9.6 tests outside the ledger + 12.7 gap vs Console on 11/18
       # Second provider (Nebius Token Factory, OpenAI-compatible) for after the Claude
-      # credit ends. Inactive while PROVIDER_SWITCH_AT is empty; set it (and LOOP_UNTIL)
-      # only after a Test Bot run on this provider has passed. Own ledger, cap and cutoff.
+      # credit ends. Switch on since 11/20 (user decision) after four bot-testing-area runs
+      # (last: 44563140633, 10/10, no errors). Own ledger, cap and cutoff.
       NEBIUS_API_KEY: ${{ secrets.NEBIUS_API_KEY }}
-      PROVIDER_SWITCH_AT: ""
+      PROVIDER_SWITCH_AT: "2026-11-27T15:00:00Z" # = 11/28 00:00 KST, when the Claude cutoff passes
       FORECAST_ENSEMBLE_OC: "moonshotai/Kimi-K3:3"
       RESEARCH_MODEL_OC: zai-org/GLM-5.3
       PARSER_MODEL_OC: zai-org/GLM-5.3-Flash
@@ -55,7 +55,7 @@ jobs:
       LLM_KEY_EXPIRES_OC: "2026-12-24T00:00:00Z"
       SPEND_OFFSET_USD_OC: "21.2" # Test Bot runs outside the ledger (11/19): 4.49 + 5.38 + 1.4 timeouts + 4.87 + 4.94
       # The loop keeps restarting itself until this time (LLM_KEY_EXPIRES if empty).
-      LOOP_UNTIL: ""
+      LOOP_UNTIL: "2026-12-24T00:00:00Z" # = LLM_KEY_EXPIRES_OC
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
