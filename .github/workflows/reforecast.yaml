@@ -1,0 +1,85 @@
+name: Re-forecast closed questions (experiment)
+
+# Post-close re-forecast experiment (user decision 11/20). Takes questions the
+# live bot has forecast that have CLOSED, and runs the forecasting step again
+# with other models on the research saved when the bot first forecast them.
+# Nothing is posted (reforecast.py refuses every post call). Scored once the
+# questions resolve. Own ledger and $25 cap, separate from the live bot.
+on:
+  workflow_dispatch:
+    inputs:
+      max_questions:
+        description: "Questions per run"
+        default: "15"
+  schedule:
+    - cron: "23 4 * * *" # daily, 13:23 KST
+
+concurrency:
+  group: reforecast
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read # to download the live bot's reports artifacts
+
+jobs:
+  reforecast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }} # read-only: resolutions
+      NEBIUS_API_KEY: ${{ secrets.NEBIUS_API_KEY }}
+      GITHUB_TOKEN: ${{ github.token }}
+      LLM_PROVIDER: openai_compat
+      PARSER_MODEL_OC: zai-org/GLM-5.3-Flash
+      FORECAST_CALL_TIMEOUT_OC: "300"
+      # name=model:samples. A config is skipped where the posted forecast already
+      # came from that model (it is then the posted forecast itself).
+      REFORECAST_CONFIGS: "kimi-k3=moonshotai/Kimi-K3:3,glm-5.3=zai-org/GLM-5.3:3,deepseek-flash=deepseek-ai/DeepSeek-V4.1-Flash-1017:3"
+      SPEND_LEDGER: spend/ledger_exp.json
+      SPEND_CAP_USD: "25"
+      RUN_CAP_USD: "5"
+      SPEND_OFFSET_USD: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: "0.13.1"
+      - run: uv sync --locked
+      - name: Restore experiment state
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            spend/ledger_exp.json
+            reforecast/results.jsonl
+          key: reforecast-state-${{ github.run_id }}
+          restore-keys: reforecast-state-
+      - name: Re-forecast closed questions
+        run: uv run python reforecast.py run --max-questions ${{ inputs.max_questions || 15 }}
+      - name: Score resolved questions
+        if: always()
+        run: |
+          uv run python reforecast.py score || echo "scoring failed (exit $?)"
+          [ -f reforecast/summary.md ] && cat reforecast/summary.md >> $GITHUB_STEP_SUMMARY || true
+      - name: Save experiment state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            spend/ledger_exp.json
+            reforecast/results.jsonl
+          key: reforecast-state-${{ github.run_id }}
+      - name: Keep results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reforecast-${{ github.run_id }}
+          path: |
+            reforecast/results.jsonl
+            reforecast/summary.md
+            spend/ledger_exp.json
+          if-no-files-found: ignore
+          retention-days: 90

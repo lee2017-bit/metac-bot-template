@@ -134,7 +134,9 @@ class OpenAICompatForecastLlm(GeneralLlm):
             {"role": "user", "content": prompt},
         ]
         try:
-            response = await get_client().with_options(max_retries=1).chat.completions.create(
+            response = await get_client().with_options(
+                max_retries=1, timeout=float(os.getenv("FORECAST_CALL_TIMEOUT_OC", "600"))
+            ).chat.completions.create(
                 model=model, messages=messages, max_tokens=self.max_tokens
             )
         except openai.APITimeoutError:
