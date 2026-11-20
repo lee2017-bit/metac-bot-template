@@ -35,7 +35,10 @@ jobs:
       FORECAST_CALL_TIMEOUT_OC: "300"
       # name=model:samples. A config is skipped where the posted forecast already
       # came from that model (it is then the posted forecast itself).
-      REFORECAST_CONFIGS: "kimi-k3=moonshotai/Kimi-K3:3,glm-5.3=zai-org/GLM-5.3:3,deepseek-flash=deepseek-ai/DeepSeek-V4.1-Flash-1017:3"
+      # glm-5.3 dropped after run 44642389305 (17 of 45 samples failed: 529 overloaded / timeouts).
+      REFORECAST_CONFIGS: "kimi-k3=moonshotai/Kimi-K3:3,kimi-k3.1-pro=moonshotai/Kimi-K3.1-Pro:3,deepseek-flash=deepseek-ai/DeepSeek-V4.1-Flash-1017:3"
+      # Kimi-K3.1-Pro's Nebius price could not be confirmed: count it at Kimi-K3's.
+      OC_PRICES: '{"moonshotai/Kimi-K3.1-Pro": [3.0e-6, 15.0e-6]}'
       SPEND_LEDGER: spend/ledger_exp.json
       SPEND_CAP_USD: "25"
       RUN_CAP_USD: "5"

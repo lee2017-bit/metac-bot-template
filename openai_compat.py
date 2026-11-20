@@ -72,8 +72,15 @@ def cost_of(model: str, usage) -> float:
     return (usage.prompt_tokens or 0) * inp + (usage.completion_tokens or 0) * out
 
 
-def add_cost(cost: float) -> None:
+# Running total per model in this process (for experiments that run several
+# models at once and need to attribute cost; the cap itself uses add_cost).
+COST_BY_MODEL: dict[str, float] = {}
+
+
+def add_cost(cost: float, model: str | None = None) -> None:
     MonetaryCostManager.increase_current_usage_in_parent_managers(cost)
+    if model:
+        COST_BY_MODEL[model] = COST_BY_MODEL.get(model, 0.0) + cost
 
 
 def worst_case_cost(model: str, max_tokens: int, prompt_chars: int) -> float:
@@ -140,10 +147,10 @@ class OpenAICompatForecastLlm(GeneralLlm):
                 model=model, messages=messages, max_tokens=self.max_tokens
             )
         except openai.APITimeoutError:
-            add_cost(worst_case_cost(model, self.max_tokens, len(prompt)))
+            add_cost(worst_case_cost(model, self.max_tokens, len(prompt)), model)
             raise
         cost = cost_of(model, response.usage)
-        add_cost(cost)
+        add_cost(cost, model)
         choice = response.choices[0]
         text = (choice.message.content or "").strip()
         tokens = getattr(response.usage, "completion_tokens", None)

@@ -46,7 +46,7 @@ SUMMARY = Path(os.getenv("REFORECAST_SUMMARY", "reforecast/summary.md"))
 # name=model:samples, comma separated
 CONFIGS = os.getenv(
     "REFORECAST_CONFIGS",
-    "kimi-k3=moonshotai/Kimi-K3:3,glm-5.3=zai-org/GLM-5.3:3,"
+    "kimi-k3=moonshotai/Kimi-K3:3,kimi-k3.1-pro=moonshotai/Kimi-K3.1-Pro:3,"
     "deepseek-flash=deepseek-ai/DeepSeek-V4.1-Flash-1017:3",
 )
 TEST_SLUGS = {"bot-testing-area"}
@@ -184,7 +184,7 @@ async def run(reports_dir: Path, max_questions: int) -> None:
     from claude_llm import current_model
     from forecasting_tools import MetaculusApi, MonetaryCostManager
     from forecasting_tools.ai_models.resource_managers.hard_limit_manager import HardLimitExceededError
-    from openai_compat import OpenAICompatForecastLlm, parser_llm
+    from openai_compat import COST_BY_MODEL, OpenAICompatForecastLlm, parser_llm
     from spend_guard import record_run, remaining_budget
 
     # Nothing in this experiment may publish anything.
@@ -197,7 +197,9 @@ async def run(reports_dir: Path, max_questions: int) -> None:
 
     budget = remaining_budget()
     configs = parse_configs(CONFIGS)
-    done = {(r["qid"], r["config"]) for r in load_state() if r.get("kind") == "sample"}
+    # a config counts as done for a question once it has a usable sample
+    done = {(r["qid"], r["config"]) for r in load_state()
+            if r.get("kind") == "sample" and (r.get("prediction") is not None or r.get("reused_posted"))}
     by_q = collect_reports(reports_dir)
     now = datetime.now(timezone.utc)
     todo = []
@@ -240,6 +242,7 @@ async def run(reports_dir: Path, max_questions: int) -> None:
             posted = posted_model(rep.explanation)
             bot._note_pads.append(await bot._initialize_notepad(q))
             rows = []
+            jobs = []  # (config name, model, sample index)
             for cname in missing:
                 model, n = configs[cname]
                 if posted and posted == model:
@@ -247,26 +250,31 @@ async def run(reports_dir: Path, max_questions: int) -> None:
                     rows.append({"kind": "sample", "qid": qid, "config": cname, "model": model,
                                  "reused_posted": True, "prediction": None})
                     continue
+                jobs += [(cname, model, i) for i in range(n)]
 
-                async def one(i: int, model=model):
-                    token = current_model.set(model)
-                    try:
-                        before = cost_manager.current_usage
-                        pred = await bot._make_prediction(q, item["research"])
-                        return {"prediction": prediction_to_json(pred.prediction_value),
-                                "cost": round(cost_manager.current_usage - before, 5)}
-                    except HardLimitExceededError:
-                        raise
-                    except Exception as e:
-                        return {"error": f"{type(e).__name__}: {str(e)[:200]}"}
-                    finally:
-                        current_model.reset(token)
+            async def one(cname: str, model: str, i: int) -> dict:
+                token = current_model.set(model)
+                try:
+                    pred = await bot._make_prediction(q, item["research"])
+                    return {"prediction": prediction_to_json(pred.prediction_value)}
+                except HardLimitExceededError:
+                    raise
+                except Exception as e:
+                    return {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+                finally:
+                    current_model.reset(token)
 
-                results = await asyncio.gather(*(one(i) for i in range(n)))
-                for i, res in enumerate(results):
-                    n_errors += "error" in res
-                    rows.append({"kind": "sample", "qid": qid, "config": cname, "model": model,
-                                 "i": i, **res})
+            # every sample of every config at once (the date is per question)
+            before = {m: COST_BY_MODEL.get(m, 0.0) for _, m, _ in jobs}
+            results = await asyncio.gather(*(one(*j) for j in jobs))
+            per_model_n: dict[str, int] = {}
+            for _, m, _ in jobs:
+                per_model_n[m] = per_model_n.get(m, 0) + 1
+            for (cname, model, i), res in zip(jobs, results):
+                n_errors += "error" in res
+                spent = COST_BY_MODEL.get(model, 0.0) - before.get(model, 0.0)
+                rows.append({"kind": "sample", "qid": qid, "config": cname, "model": model, "i": i,
+                             "cost": round(spent / per_model_n[model], 5), **res})
             for row in rows:
                 row.update({"url": q.page_url, "type": q.question_type,
                             "as_of": item["accessed"].isoformat(),

@@ -482,10 +482,16 @@ async def run_free_research(prompt: str) -> str:
             )
             continue
         except (openai.APIConnectionError, openai.InternalServerError, openai.RateLimitError) as e:
+            # e.g. 529 "System is overloaded", seen often for GLM-5.3 on 11/20
             empty_replies += 1
-            logger.warning(f"Research call failed ({type(e).__name__}, attempt {empty_replies}); retrying in 10 s")
+            logger.warning(
+                f"Research call to {model} failed ({type(e).__name__}, attempt {empty_replies}); retrying in 10 s"
+            )
             if empty_replies > 2:
                 break
+            if model != FALLBACK_MODEL:
+                model = FALLBACK_MODEL
+                models_used.append(model)
             await asyncio.sleep(10)
             continue
         cost = cost_of(model, response.usage)
