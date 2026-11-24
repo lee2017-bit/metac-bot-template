@@ -15,6 +15,7 @@ returns a research write-up, so it can be reused by other forecasting code.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -40,6 +41,10 @@ FETCH_TOOL = os.getenv("RESEARCH_FETCH_TOOL", "web_fetch_20250910")
 FETCH_MAX_TOKENS = int(os.getenv("RESEARCH_FETCH_MAX_TOKENS", "8000"))
 # Prediction-market lookup calls allowed per question (0 = off).
 MAX_MARKET_LOOKUPS = int(os.getenv("RESEARCH_MAX_MARKET_LOOKUPS", "0"))
+# The bot's own page reader (0 = off): a client-side tool that opens any URL,
+# including ones the server-side web_fetch refuses because they did not appear
+# in search results, and reads PDF/CSV/JSON. Same code as the free research path.
+MAX_PAGE_READS = int(os.getenv("RESEARCH_MAX_PAGE_READS", "0"))
 
 # USD per token (input, output). Web search: $10 per 1000 searches. Web fetch
 # has no charge beyond the tokens of the fetched page.
@@ -68,6 +73,22 @@ _MARKET_TOOL = {
             "query": {"type": "string", "description": "2-5 keywords, e.g. 'Fed decision December'"}
         },
         "required": ["query"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
+_READ_PAGE_TOOL = {
+    "name": "read_page",
+    "description": (
+        "Open a public URL and return its readable text (HTML pages, PDF documents, CSV and JSON files). "
+        "Works for any address, including official pages and data files you know or can infer, not only "
+        "pages that appeared in search results. metaculus.com is refused."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"url": {"type": "string", "description": "Full http(s) URL"}},
+        "required": ["url"],
         "additionalProperties": False,
     },
     "strict": True,
@@ -119,7 +140,25 @@ def _build_tools() -> list[dict]:
         )
     if MAX_MARKET_LOOKUPS > 0:
         tools.append(_MARKET_TOOL)
+    if MAX_PAGE_READS > 0:
+        tools.append(_READ_PAGE_TOOL)
     return tools
+
+
+async def _run_read_page(tool_input: object, used: int) -> tuple[str, bool]:
+    """Returns (text, is_error)."""
+    if used >= MAX_PAGE_READS:
+        return "Page-read limit reached for this question; write up with what you have.", True
+    url = tool_input.get("url") if isinstance(tool_input, dict) else None
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return "Invalid input: 'url' must be a full http(s) URL.", True
+    try:
+        from free_research import web_fetch_sync
+
+        return await asyncio.to_thread(web_fetch_sync, url), False
+    except Exception as e:  # never let a page break research
+        logger.warning(f"read_page failed: {type(e).__name__}: {e}")
+        return "Page could not be read; continue without it.", True
 
 
 async def _run_market_tool(tool_input: object, used: int) -> tuple[str, bool]:
@@ -142,7 +181,7 @@ async def run_claude_web_research(prompt: str) -> str:
     messages: list = [{"role": "user", "content": prompt}]
     tools = _build_tools()
     total_cost = 0.0
-    market_calls = searches = fetches = 0
+    market_calls = searches = fetches = page_reads = 0
     fetch_errors: list[str] = []
     response = None
     # Each pass is one request. pause_turn: the server-side loop stopped early,
@@ -179,6 +218,9 @@ async def run_claude_web_research(prompt: str) -> str:
                 if block.name == "market_search":
                     text, is_error = await _run_market_tool(block.input, market_calls)
                     market_calls += 1
+                elif block.name == "read_page":
+                    text, is_error = await _run_read_page(block.input, page_reads)
+                    page_reads += 1
                 else:
                     text, is_error = f"Unknown tool {block.name}.", True
                 results.append(
@@ -211,6 +253,7 @@ async def run_claude_web_research(prompt: str) -> str:
         texts = [b.text for b in blocks if b.type == "text"]
     logger.info(
         f"Research cost ${total_cost:.4f} (stop={response.stop_reason}, searches={searches}, "
-        f"fetches={fetches}, fetch_errors={fetch_errors}, market_lookups={market_calls})"
+        f"fetches={fetches}, fetch_errors={fetch_errors}, market_lookups={market_calls}, "
+        f"page_reads={page_reads})"
     )
     return "".join(texts).strip()

@@ -43,7 +43,7 @@ from forecasting_tools import (
 )
 
 from claude_llm import ClaudeForecastLlm, current_model, parse_ensemble
-from claude_research import MAX_FETCHES, MAX_MARKET_LOOKUPS, run_claude_web_research
+from claude_research import MAX_FETCHES, MAX_MARKET_LOOKUPS, MAX_PAGE_READS, run_claude_web_research
 from free_research import run_free_research
 from openai_compat import OpenAICompatForecastLlm, parser_llm
 from discrete_values import (
@@ -316,6 +316,12 @@ class FallTemplateBot2026(ForecastBot):
                 f"its latest published value, when the question names one, and to report the latest figure on it with its date.{named} "
                 f"You have at most {MAX_FETCHES} page reads; spend any left over on the most important sources you find instead of "
                 "relying on search snippets, and say which pages could not be opened."
+            )
+        if MAX_PAGE_READS > 0:
+            rules.append(
+                f"read_page opens any public URL directly (also PDFs, CSV and JSON files, and pages that web_fetch "
+                f"cannot open because they did not appear in search results), at most {MAX_PAGE_READS} times. Use it for "
+                "the resolution source, its data files, or an official page whose address you know or can infer."
             )
         if MAX_MARKET_LOOKUPS > 0:
             rules.append(
@@ -1050,6 +1056,11 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
+    if os.getenv("LOG_PRIVATE_TEXT", "0") == "1":
+        # Public Actions logs: keep research and reasoning text out of them.
+        import log_privacy
+
+        log_privacy.install()
 
     parser = argparse.ArgumentParser(description="Run the template forecasting bot")
     parser.add_argument(

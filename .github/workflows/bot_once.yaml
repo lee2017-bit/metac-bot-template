@@ -1,0 +1,103 @@
+name: Forecast once (short run)
+
+# Spring-season structure (branch spring-prep, not active on main): one short
+# job per tick instead of the hour-long self-restarting loop. A stdlib-only
+# pre-check asks Metaculus whether any open question still lacks our forecast;
+# only then are dependencies installed and the bot run. Idle ticks take well
+# under a minute, which keeps a private repository inside the free Actions
+# minutes (about 1,500 min/month at two ticks per hour). Research and
+# reasoning text is kept out of the logs (LOG_PRIVATE_TEXT).
+# Same concurrency group as the loop, so the two never run at once.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "11,41 * * * *" # MiniBench questions stay open ~3 h, so 30 min is enough
+
+concurrency:
+  group: forecast-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  once:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      SPEND_CAP_USD: "140"
+      RUN_CAP_USD: "15"
+      LLM_KEY_EXPIRES: "2026-11-27T15:00:00Z"
+      FORECAST_ENSEMBLE: "claude-fable-5-2:2,claude-opus-5-5:3"
+      FORECAST_EFFORT: "high"
+      PARSER_MODEL: "anthropic/claude-haiku-5-5"
+      RESEARCHER: "claude-web-search"
+      RESEARCH_MODEL: "claude-sonnet-5-5"
+      RESEARCH_EFFORT: "high"
+      RESEARCH_MAX_SEARCHES: "6"
+      RESEARCH_SEARCH_TOOL: "web_search_20250305"
+      RESEARCH_FULL_CONTEXT: "1"
+      RESEARCH_MAX_FETCHES: "3"
+      RESEARCH_MAX_MARKET_LOOKUPS: "2"
+      DISCRETE_PER_VALUE_MAX: "35"
+      SPEND_OFFSET_USD: "22.3"
+      NEBIUS_API_KEY: ${{ secrets.NEBIUS_API_KEY }}
+      PROVIDER_SWITCH_AT: "2026-11-27T15:00:00Z"
+      FORECAST_ENSEMBLE_OC: "moonshotai/Kimi-K3:3"
+      RESEARCH_MODEL_OC: "zai-org/GLM-5.3"
+      PARSER_MODEL_OC: "zai-org/GLM-5.3-Flash"
+      SPEND_CAP_USD_OC: "70"
+      RUN_CAP_USD_OC: "8"
+      LLM_KEY_EXPIRES_OC: "2026-12-24T00:00:00Z"
+      SPEND_OFFSET_USD_OC: "21.2"
+      LOOP_UNTIL: "2026-12-24T00:00:00Z"
+      LOG_PRIVATE_TEXT: "1"
+      PRECHECK_TOURNAMENTS: "33121,minibench"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Anything new to forecast?
+        id: pre
+        run: python3 tools/precheck.py
+      - uses: actions/setup-python@v5
+        if: steps.pre.outputs.run == 'true'
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v10.3.0
+        if: steps.pre.outputs.run == 'true'
+        with:
+          version: "0.13.1"
+      - if: steps.pre.outputs.run == 'true'
+        run: uv sync --locked
+      - name: Restore spend ledger
+        if: steps.pre.outputs.run == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: spend
+          key: spend-ledger-${{ github.run_id }}
+          restore-keys: spend-ledger-
+      - name: Forecast
+        if: steps.pre.outputs.run == 'true'
+        run: uv run python main.py
+      - name: Save spend ledger
+        if: always() && steps.pre.outputs.run == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: spend
+          key: spend-ledger-${{ github.run_id }}
+      - name: Drop empty report files
+        if: always() && steps.pre.outputs.run == 'true'
+        run: |
+          for f in reports/*.json; do
+            [ -f "$f" ] || continue
+            python3 -c "import json,sys;sys.exit(0 if json.load(open(sys.argv[1])) else 1)" "$f" || rm -f "$f"
+          done
+      - name: Keep reports
+        if: always() && steps.pre.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 90
