@@ -55,8 +55,9 @@ jobs:
       # Claude configs (user decision 11/25, Ultra credit before it expires 11/28 09:00 KST): same
       # questions as the Nebius run (REFORECAST_SCOPE=state) plus, if asked, open Fall questions.
       # The posted forecast already is the live set-up (2 x Fable + 3 x Opus on the same research),
-      # so Fable-only and Opus-only come from it for free.
-      REFORECAST_CONFIGS: ${{ inputs.provider == 'anthropic' && 'claude-sonnet=claude|claude-sonnet-5-5:3,claude-opus-noresearch=claude-noresearch|claude-opus-5-5:2,claude-haiku=claude|claude-haiku-5-5:3' || 'kimi-k3=moonshotai/Kimi-K3:3,kimi-k3.1-pro=moonshotai/Kimi-K3.1-Pro:3,deepseek-flash=deepseek-ai/DeepSeek-V4.1-Flash-1017:3' }}
+      # so Fable-only and Opus-only come from it for free. claude-fable (added 11/26) gives
+      # Fable-only three fresh samples, like the other configs, instead of the posted two.
+      REFORECAST_CONFIGS: ${{ inputs.provider == 'anthropic' && 'claude-sonnet=claude|claude-sonnet-5-5:3,claude-opus-noresearch=claude-noresearch|claude-opus-5-5:2,claude-haiku=claude|claude-haiku-5-5:3,claude-fable=claude|claude-fable-5-2:3' || 'kimi-k3=moonshotai/Kimi-K3:3,kimi-k3.1-pro=moonshotai/Kimi-K3.1-Pro:3,deepseek-flash=deepseek-ai/DeepSeek-V4.1-Flash-1017:3' }}
       # 'all' for both: run 45632894817 found no open Fall question (they close within
       # a day or two), so the Claude configs also take every other closed question with
       # saved Claude research (and Fall questions forecast before the stop time).
@@ -66,7 +67,10 @@ jobs:
       # Kimi-K3.1-Pro's Nebius price could not be confirmed: count it at Kimi-K3's.
       OC_PRICES: '{"moonshotai/Kimi-K3.1-Pro": [3.0e-6, 15.0e-6]}'
       SPEND_LEDGER: ${{ inputs.provider == 'anthropic' && 'spend/ledger_exp_claude.json' || 'spend/ledger_exp.json' }}
-      SPEND_CAP_USD: ${{ inputs.provider == 'anthropic' && '33' || '25' }} # Claude: counted, about $40 billed
+      # Claude: user raised the limit 11/26 to use the Ultra credit left before it expires
+      # (11/28 09:00 KST). Without web search the counted cost matched the billed one
+      # (11/25: $11.51 counted vs $11.04 off the Ultra balance).
+      SPEND_CAP_USD: ${{ inputs.provider == 'anthropic' && '45' || '25' }}
       RUN_CAP_USD: ${{ inputs.run_cap || '5' }}
       SPEND_OFFSET_USD: "0"
     steps:
