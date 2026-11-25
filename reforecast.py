@@ -52,12 +52,26 @@ CONFIGS = os.getenv(
 TEST_SLUGS = {"bot-testing-area"}
 
 
-def parse_configs(text: str) -> dict[str, tuple[str, int]]:
+PROVIDERS = ("oc", "claude", "claude-noresearch")
+NO_RESEARCH = (
+    "No research report is available for this question. Forecast from the question text, its "
+    "background and resolution criteria, and your own knowledge up to today's date, and say that "
+    "you had no research."
+)
+
+
+def parse_configs(text: str) -> dict[str, tuple[str, str, int]]:
+    """name=[provider|]model:samples, comma separated. provider: oc (default,
+    OpenAI-compatible/Nebius), claude, or claude-noresearch (Claude without the
+    saved research)."""
     out = {}
     for part in filter(None, (p.strip() for p in text.split(","))):
         name, rest = part.split("=", 1)
+        provider, _, rest = rest.rpartition("|") if "|" in rest else ("oc", "", rest)
         model, _, n = rest.rpartition(":")
-        out[name.strip()] = (model.strip(), int(n))
+        if provider not in PROVIDERS:
+            raise ValueError(f"unknown provider {provider!r} in {part!r}")
+        out[name.strip()] = (provider, model.strip(), int(n))
     return out
 
 
@@ -184,7 +198,9 @@ async def run(reports_dir: Path, max_questions: int) -> None:
     from claude_llm import current_model
     from forecasting_tools import MetaculusApi, MonetaryCostManager
     from forecasting_tools.ai_models.resource_managers.hard_limit_manager import HardLimitExceededError
-    from openai_compat import COST_BY_MODEL, OpenAICompatForecastLlm, parser_llm
+    from forecasting_tools import GeneralLlm
+    from claude_llm import ClaudeForecastLlm
+    from openai_compat import OpenAICompatForecastLlm, parser_llm
     from spend_guard import record_run, remaining_budget
 
     # Nothing in this experiment may publish anything.
@@ -202,61 +218,94 @@ async def run(reports_dir: Path, max_questions: int) -> None:
             if r.get("kind") == "sample" and (r.get("prediction") is not None or r.get("reused_posted"))}
     by_q = collect_reports(reports_dir)
     now = datetime.now(timezone.utc)
+    # REFORECAST_SCOPE=state: only questions already in the experiment (so a new
+    # set of configs runs on exactly the same questions). REFORECAST_INCLUDE_OPEN=1:
+    # also open non-MiniBench questions; their samples are stored for scoring
+    # later and never posted or used by the live bot.
+    scope_state = os.getenv("REFORECAST_SCOPE", "") == "state"
+    include_open = os.getenv("REFORECAST_INCLUDE_OPEN", "0") == "1"
+    in_state = {r["qid"] for r in load_state() if r.get("kind") == "sample"}
+    stop_at = os.getenv("REFORECAST_STOP_AT", "").strip()
+    stop_at = datetime.fromisoformat(stop_at.replace("Z", "+00:00")) if stop_at else None
     todo = []
     for qid, item in by_q.items():
         q = item["report"].question
-        if q.close_time is None or q.close_time > now:
-            continue  # still open: never touched
+        is_open = q.close_time is None or q.close_time > now
+        if is_open:
+            if not include_open or "minibench" in " ".join(q.tournament_slugs or []).lower():
+                continue  # still open: not touched unless asked for
+        elif scope_state and qid not in in_state:
+            continue
         missing = [c for c in configs if (qid, c) not in done]
         if missing:
-            todo.append((q.close_time, qid, missing))
-    # binary and multiple choice first (cheapest to score, most informative), oldest first
+            todo.append((is_open, q.close_time or now, qid, missing))
+    # closed first (they resolve soonest), then binary and multiple choice, oldest first
     order = {"binary": 0, "multiple_choice": 1}
-    todo.sort(key=lambda t: (order.get(by_q[t[1]]["report"].question.question_type, 2), t[0]))
-    print(f"{len(by_q)} questions with saved research, {len(todo)} closed with work left; budget ${budget:.2f}")
+    todo.sort(key=lambda t: (t[0], order.get(by_q[t[2]]["report"].question.question_type, 2), t[1]))
+    n_open = sum(1 for t in todo if t[0])
+    print(f"{len(by_q)} questions with saved research, {len(todo)} with work left "
+          f"({n_open} still open); budget ${budget:.2f}")
 
-    parser = parser_llm(os.getenv("PARSER_MODEL_OC", "zai-org/GLM-5.3-Flash"))
-    first_model = next(iter(configs.values()))[0]
-    bot = main.FallTemplateBot2026(
-        research_reports_per_question=1,
-        predictions_per_research_report=1,
-        publish_reports_to_metaculus=False,
-        llms={
-            "default": OpenAICompatForecastLlm(first_model),
-            "summarizer": parser,
-            "researcher": "claude-web-search",
-            "parser": parser,
-        },
-    )
-    bot.ensemble_models = []  # the model is set per sample below
+    def make_bot(llm, parser):
+        b = main.FallTemplateBot2026(
+            research_reports_per_question=1,
+            predictions_per_research_report=1,
+            publish_reports_to_metaculus=False,
+            llms={"default": llm, "summarizer": parser, "researcher": "claude-web-search", "parser": parser},
+        )
+        b.ensemble_models = []  # the model is set per sample below
+        return b
+
+    bots = {}
+    kinds = {p for p, _, _ in configs.values()}
+    if "oc" in kinds:
+        first = next(m for p, m, _ in configs.values() if p == "oc")
+        bots["oc"] = make_bot(OpenAICompatForecastLlm(first),
+                              parser_llm(os.getenv("PARSER_MODEL_OC", "zai-org/GLM-5.3-Flash")))
+    if kinds & {"claude", "claude-noresearch"}:
+        first = next(m for p, m, _ in configs.values() if p != "oc")
+        claude_bot = make_bot(
+            ClaudeForecastLlm(first, effort=os.getenv("FORECAST_EFFORT", "high")),
+            GeneralLlm(model=os.getenv("PARSER_MODEL", "anthropic/claude-haiku-5-5"), temperature=None),
+        )
+        bots["claude"] = bots["claude-noresearch"] = claude_bot
 
     cost_manager = MonetaryCostManager(hard_limit=budget)
     cost_manager.__enter__()
     n_questions = n_errors = 0
     try:
-        for _, qid, missing in todo[:max_questions]:
+        for _, _, qid, missing in todo[:max_questions]:
+            if stop_at and datetime.now(timezone.utc) >= stop_at:
+                print(f"Stop time {stop_at.isoformat()} reached; not starting more questions.")
+                break
             item = by_q[qid]
             rep, q = item["report"], item["report"].question
             main.datetime = _FrozenDatetime  # prompts say "Today is <original date>"
             _FrozenDatetime.as_of = item["accessed"]
             posted = posted_model(rep.explanation)
-            bot._note_pads.append(await bot._initialize_notepad(q))
+            for b in {id(b): b for b in bots.values()}.values():
+                b._note_pads.append(await b._initialize_notepad(q))
             rows = []
-            jobs = []  # (config name, model, sample index)
+            jobs = []  # (config name, provider, model, sample index)
             for cname in missing:
-                model, n = configs[cname]
-                if posted and posted == model:
+                provider, model, n = configs[cname]
+                if posted and posted.split("/")[-1] == model.split("/")[-1] and provider != "claude-noresearch":
                     # the posted forecast already is this model on this research
                     rows.append({"kind": "sample", "qid": qid, "config": cname, "model": model,
                                  "reused_posted": True, "prediction": None})
                     continue
-                jobs += [(cname, model, i) for i in range(n)]
+                jobs += [(cname, provider, model, i) for i in range(n)]
 
-            async def one(cname: str, model: str, i: int) -> dict:
+            async def one(cname: str, provider: str, model: str, i: int) -> dict:
                 token = current_model.set(model)
+                research = NO_RESEARCH if provider == "claude-noresearch" else item["research"]
                 try:
-                    pred = await bot._make_prediction(q, item["research"])
-                    return {"prediction": prediction_to_json(pred.prediction_value)}
+                    # Cost managers are per task, so this one sees exactly this
+                    # sample's calls (forecast and parsing).
+                    with MonetaryCostManager() as own:
+                        pred = await bots[provider]._make_prediction(q, research)
+                    return {"prediction": prediction_to_json(pred.prediction_value),
+                            "cost": round(own.current_usage, 5)}
                 except HardLimitExceededError:
                     raise
                 except Exception as e:
@@ -265,20 +314,15 @@ async def run(reports_dir: Path, max_questions: int) -> None:
                     current_model.reset(token)
 
             # every sample of every config at once (the date is per question)
-            before = {m: COST_BY_MODEL.get(m, 0.0) for _, m, _ in jobs}
             results = await asyncio.gather(*(one(*j) for j in jobs))
-            per_model_n: dict[str, int] = {}
-            for _, m, _ in jobs:
-                per_model_n[m] = per_model_n.get(m, 0) + 1
-            for (cname, model, i), res in zip(jobs, results):
+            for (cname, provider, model, i), res in zip(jobs, results):
                 n_errors += "error" in res
-                spent = COST_BY_MODEL.get(model, 0.0) - before.get(model, 0.0)
-                rows.append({"kind": "sample", "qid": qid, "config": cname, "model": model, "i": i,
-                             "cost": round(spent / per_model_n[model], 5), **res})
+                rows.append({"kind": "sample", "qid": qid, "config": cname, "provider": provider,
+                             "model": model, "i": i, **res})
             for row in rows:
                 row.update({"url": q.page_url, "type": q.question_type,
                             "as_of": item["accessed"].isoformat(),
-                            "close_time": q.close_time.isoformat(),
+                            "close_time": q.close_time.isoformat() if q.close_time else None,
                             "posted_model": posted,
                             "posted": prediction_to_json(rep.prediction),
                             "title": q.question_text[:160]})

@@ -7,6 +7,8 @@ from typing import Literal
 
 import dotenv
 
+import profile_env  # first: applies CONFIG_PROFILE before other modules read settings
+
 # Runtime helpers (env validation, banners, dependency-warning suppression).
 from bot_helpers import (
     check_environment,
@@ -1060,6 +1062,12 @@ if __name__ == "__main__":
         help="What to forecast on (default: tournament)",
     )
     parser.add_argument(
+        "--tournaments",
+        choices=["both", "fall", "minibench"],
+        default="both",
+        help="In tournament mode: which tournaments to forecast (default: both)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Forecast but do not publish anything to Metaculus",
@@ -1080,6 +1088,8 @@ if __name__ == "__main__":
         }
         for name, default in oc_defaults.items():
             os.environ[name] = os.getenv(name + "_OC", default)
+    if profile_env.NOTE:
+        print(profile_env.NOTE)
     print(f"LLM provider: {PROVIDER}")
     check_environment(strict=True)
     check_key_expiry()
@@ -1148,16 +1158,20 @@ if __name__ == "__main__":
 
     atexit.register(_record_on_exit)
     if run_mode == "tournament":
-        seasonal_tournament_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
-                client.CURRENT_AI_COMPETITION_ID, return_exceptions=True
+        seasonal_tournament_reports = []
+        minibench_reports = []
+        if args.tournaments in ("both", "fall"):
+            seasonal_tournament_reports = asyncio.run(
+                template_bot.forecast_on_tournament(
+                    client.CURRENT_AI_COMPETITION_ID, return_exceptions=True
+                )
             )
-        )
-        minibench_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
-                client.CURRENT_MINIBENCH_ID, return_exceptions=True
+        if args.tournaments in ("both", "minibench"):
+            minibench_reports = asyncio.run(
+                template_bot.forecast_on_tournament(
+                    client.CURRENT_MINIBENCH_ID, return_exceptions=True
+                )
             )
-        )
         forecast_reports = seasonal_tournament_reports + minibench_reports
     elif run_mode == "metaculus_cup":
         # The Metaculus Cup may be uninitialized near the start of a season
@@ -1187,7 +1201,9 @@ if __name__ == "__main__":
         run_cost_manager.current_usage,
         len(forecast_reports),
         n_errors,
-        run_mode + (" (dry run)" if args.dry_run else ""),
+        run_mode
+        + ("" if run_mode != "tournament" or args.tournaments == "both" else f":{args.tournaments}")
+        + (" (dry run)" if args.dry_run else ""),
     )
     _recorded["done"] = True
     template_bot.log_report_summary(forecast_reports)

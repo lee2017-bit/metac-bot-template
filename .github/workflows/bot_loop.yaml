@@ -54,6 +54,22 @@ jobs:
       RUN_CAP_USD_OC: "8"
       LLM_KEY_EXPIRES_OC: "2026-12-24T00:00:00Z"
       SPEND_OFFSET_USD_OC: "21.2" # Test Bot runs outside the ledger (11/19): 4.49 + 5.38 + 1.4 timeouts + 4.87 + 4.94
+      # MiniBench keeps Claude after 11/28 (user decision 11/25; Max credit $100 until
+      # 12/25 13:37 KST). The bot runs once per tournament; the MiniBench run uses
+      # CONFIG_PROFILE=MB, and from PROFILE_FROM_MB on its _MB settings replace the plain
+      # ones for that run only (profile_env.py). The Fall run moves to Nebius as planned.
+      PROFILE_FROM_MB: "2026-11-27T15:00:00Z" # = 11/28 00:00 KST
+      SPEND_LEDGER_MB: spend/ledger_mb.json
+      SPEND_CAP_USD_MB: "75" # counted; about $90 billed (the ledger under-counts ~20%)
+      SPEND_OFFSET_USD_MB: "0"
+      RUN_CAP_USD_MB: "12"
+      LLM_KEY_EXPIRES_MB: "2026-12-25T04:00:00Z" # 12/25 13:00 KST, before the Max credit ends (13:37)
+      PROVIDER_SWITCH_AT_MB: "2026-12-25T04:00:00Z" # then MiniBench moves to Nebius too
+      SWITCH_ON_CAP_MB: "1" # MiniBench Claude cap reached -> Nebius for the rest
+      # Cost per question about $0.97 counted -> about $0.55 ($0.65 billed):
+      FORECAST_ENSEMBLE_MB: "claude-opus-5-5:3" # 3 x Opus; drops the 2 Fable calls ($0.31 of $0.97)
+      RESEARCH_MAX_SEARCHES_MB: "5" # was 6
+      RESEARCH_FETCH_MAX_TOKENS_MB: "6000" # was 8000 per page
       # The loop keeps restarting itself until this time (LLM_KEY_EXPIRES if empty).
       LOOP_UNTIL: "2026-12-24T00:00:00Z" # = LLM_KEY_EXPIRES_OC
     steps:
@@ -76,7 +92,8 @@ jobs:
           end=$(( $(date +%s) + 55*60 ))
           while [ $(date +%s) -lt $end ]; do
             echo "=== check at $(date -u +%FT%TZ) ==="
-            uv run python main.py || echo "run failed (exit $?)"
+            uv run python main.py --tournaments fall || echo "fall run failed (exit $?)"
+            CONFIG_PROFILE=MB uv run python main.py --tournaments minibench || echo "minibench run failed (exit $?)"
             for f in spend/ledger*.json; do [ -f "$f" ] || continue; python -c "import json,sys;d=json.load(open(sys.argv[1]));print(sys.argv[1],'total',d['total_usd'],d['runs'][-1])" "$f"; done
             now=$(date +%s); [ $((now + 15*60)) -gt $end ] && break
             sleep 900

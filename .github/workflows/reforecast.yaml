@@ -11,6 +11,19 @@ on:
       max_questions:
         description: "Questions per run"
         default: "15"
+      provider:
+        description: "oc = Nebius configs ($25 cap, used up: scoring only); anthropic = Claude configs (Ultra credit, own ledger, $33 counted cap, stops 11/27 22:30 UTC)"
+        type: choice
+        options: [oc, anthropic]
+        default: oc
+      run_cap:
+        description: "Counted USD for this run"
+        default: "5"
+      include_open:
+        description: "anthropic only: also open Fall questions (stored, never posted)"
+        type: choice
+        options: ["0", "1"]
+        default: "0"
   schedule:
     - cron: "23 4 * * *" # daily, 13:23 KST
 
@@ -25,23 +38,33 @@ permissions:
 jobs:
   reforecast:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     env:
       METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }} # read-only: resolutions
       NEBIUS_API_KEY: ${{ secrets.NEBIUS_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       GITHUB_TOKEN: ${{ github.token }}
+      FORECAST_EFFORT: high
+      PARSER_MODEL: anthropic/claude-haiku-5-5
       LLM_PROVIDER: openai_compat
       PARSER_MODEL_OC: zai-org/GLM-5.3-Flash
       FORECAST_CALL_TIMEOUT_OC: "300"
       # name=model:samples. A config is skipped where the posted forecast already
       # came from that model (it is then the posted forecast itself).
       # glm-5.3 dropped after run 44642389305 (17 of 45 samples failed: 529 overloaded / timeouts).
-      REFORECAST_CONFIGS: "kimi-k3=moonshotai/Kimi-K3:3,kimi-k3.1-pro=moonshotai/Kimi-K3.1-Pro:3,deepseek-flash=deepseek-ai/DeepSeek-V4.1-Flash-1017:3"
+      # Claude configs (user decision 11/25, Ultra credit before it expires 11/28 09:00 KST): same
+      # questions as the Nebius run (REFORECAST_SCOPE=state) plus, if asked, open Fall questions.
+      # The posted forecast already is the live set-up (2 x Fable + 3 x Opus on the same research),
+      # so Fable-only and Opus-only come from it for free.
+      REFORECAST_CONFIGS: ${{ inputs.provider == 'anthropic' && 'claude-sonnet=claude|claude-sonnet-5-5:3,claude-opus-noresearch=claude-noresearch|claude-opus-5-5:2,claude-haiku=claude|claude-haiku-5-5:3' || 'kimi-k3=moonshotai/Kimi-K3:3,kimi-k3.1-pro=moonshotai/Kimi-K3.1-Pro:3,deepseek-flash=deepseek-ai/DeepSeek-V4.1-Flash-1017:3' }}
+      REFORECAST_SCOPE: ${{ inputs.provider == 'anthropic' && 'state' || 'all' }}
+      REFORECAST_INCLUDE_OPEN: ${{ inputs.provider == 'anthropic' && inputs.include_open || '0' }}
+      REFORECAST_STOP_AT: ${{ inputs.provider == 'anthropic' && '2026-11-27T22:30:00Z' || '' }}
       # Kimi-K3.1-Pro's Nebius price could not be confirmed: count it at Kimi-K3's.
       OC_PRICES: '{"moonshotai/Kimi-K3.1-Pro": [3.0e-6, 15.0e-6]}'
-      SPEND_LEDGER: spend/ledger_exp.json
-      SPEND_CAP_USD: "25"
-      RUN_CAP_USD: "5"
+      SPEND_LEDGER: ${{ inputs.provider == 'anthropic' && 'spend/ledger_exp_claude.json' || 'spend/ledger_exp.json' }}
+      SPEND_CAP_USD: ${{ inputs.provider == 'anthropic' && '33' || '25' }} # Claude: counted, about $40 billed
+      RUN_CAP_USD: ${{ inputs.run_cap || '5' }}
       SPEND_OFFSET_USD: "0"
     steps:
       - uses: actions/checkout@v4
@@ -57,6 +80,7 @@ jobs:
         with:
           path: |
             spend/ledger_exp.json
+            spend/ledger_exp_claude.json
             reforecast/results.jsonl
           key: reforecast-state-${{ github.run_id }}
           restore-keys: reforecast-state-
@@ -73,6 +97,7 @@ jobs:
         with:
           path: |
             spend/ledger_exp.json
+            spend/ledger_exp_claude.json
             reforecast/results.jsonl
           key: reforecast-state-${{ github.run_id }}
       - name: Keep results
@@ -84,5 +109,6 @@ jobs:
             reforecast/results.jsonl
             reforecast/summary.md
             spend/ledger_exp.json
+            spend/ledger_exp_claude.json
           if-no-files-found: ignore
           retention-days: 90
