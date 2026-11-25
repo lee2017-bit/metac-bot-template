@@ -81,7 +81,12 @@ def parse_configs(text: str) -> dict[str, tuple[str, str, int]]:
 def load_state() -> list[dict]:
     if not STATE.exists():
         return []
-    return [json.loads(line) for line in STATE.read_text().splitlines() if line.strip()]
+    rows = [json.loads(line) for line in STATE.read_text().splitlines() if line.strip()]
+    # Run 45696607475 stored the posted forecast as claude-fable's sample: the posted
+    # Claude-era forecast is the 2 x Fable + 3 x Opus median, not Fable alone. Such rows
+    # are ignored, so the Claude configs are run for real.
+    return [r for r in rows
+            if not (r.get("reused_posted") and str(r.get("config", "")).startswith("claude"))]
 
 
 def append_state(rows: list[dict]) -> None:
@@ -289,8 +294,10 @@ async def run(reports_dir: Path, max_questions: int) -> None:
             jobs = []  # (config name, provider, model, sample index)
             for cname in missing:
                 provider, model, n = configs[cname]
-                if posted and posted.split("/")[-1] == model.split("/")[-1] and provider != "claude-noresearch":
-                    # the posted forecast already is this model on this research
+                if provider == "oc" and posted and posted.split("/")[-1] == model.split("/")[-1]:
+                    # the posted forecast already is this model on this research (Nebius
+                    # era: one model). A Claude-era posted forecast is an ensemble median
+                    # (2 x Fable + 3 x Opus) even though its LLM line names Fable.
                     rows.append({"kind": "sample", "qid": qid, "config": cname, "model": model,
                                  "reused_posted": True, "prediction": None})
                     continue
