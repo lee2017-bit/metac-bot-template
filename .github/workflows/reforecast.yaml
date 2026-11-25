@@ -75,15 +75,31 @@ jobs:
         with:
           version: "0.13.1"
       - run: uv sync --locked
+      # The cache version is a hash of the path list: keep this list exactly as
+      # it was when the Nebius runs saved their state, or none of it restores
+      # (run 45627844861 found no cache after a third path was added). The
+      # Claude ledger has a cache of its own.
       - name: Restore experiment state
         uses: actions/cache/restore@v4
         with:
           path: |
             spend/ledger_exp.json
-            spend/ledger_exp_claude.json
             reforecast/results.jsonl
           key: reforecast-state-${{ github.run_id }}
           restore-keys: reforecast-state-
+      - name: Restore Claude experiment ledger
+        uses: actions/cache/restore@v4
+        with:
+          path: spend/ledger_exp_claude.json
+          key: reforecast-claude-ledger-${{ github.run_id }}
+          restore-keys: reforecast-claude-ledger-
+      - name: Stop if the experiment state is missing
+        if: inputs.provider == 'anthropic'
+        run: |
+          if [ ! -s reforecast/results.jsonl ]; then
+            echo "reforecast/results.jsonl was not restored; refusing to run (nothing to re-forecast)"; exit 1
+          fi
+          echo "state: $(wc -l < reforecast/results.jsonl) lines"
       - name: Re-forecast closed questions
         run: uv run python reforecast.py run --max-questions ${{ inputs.max_questions || 15 }}
       - name: Score resolved questions
@@ -97,9 +113,14 @@ jobs:
         with:
           path: |
             spend/ledger_exp.json
-            spend/ledger_exp_claude.json
             reforecast/results.jsonl
           key: reforecast-state-${{ github.run_id }}
+      - name: Save Claude experiment ledger
+        if: always() && hashFiles('spend/ledger_exp_claude.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: spend/ledger_exp_claude.json
+          key: reforecast-claude-ledger-${{ github.run_id }}
       - name: Keep results
         if: always()
         uses: actions/upload-artifact@v4
