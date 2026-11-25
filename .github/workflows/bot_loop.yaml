@@ -124,7 +124,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if python -c "import datetime as d,os,sys;sys.exit(0 if d.datetime.now(d.timezone.utc)<d.datetime.fromisoformat((os.environ.get('LOOP_UNTIL') or os.environ['LLM_KEY_EXPIRES']).replace('Z','+00:00')) else 1)"; then
-            gh workflow run bot_loop.yaml --ref main
+            # GitHub sometimes answers 5xx (run 45643328536: HTTP 502 left the loop
+            # stopped for 4.5 hours); retry with back-off before giving up.
+            for i in 1 2 3 4 5 6; do
+              gh workflow run bot_loop.yaml --ref main && exit 0
+              echo "dispatch failed (attempt $i); retrying"; sleep $((i*20))
+            done
+            exit 1
           else
             echo "Past cutoff; not restarting."
           fi
