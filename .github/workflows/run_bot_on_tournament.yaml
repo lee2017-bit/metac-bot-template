@@ -64,8 +64,13 @@ jobs:
           RESEARCH_MAX_FETCHES: "3"
           RESEARCH_MAX_MARKET_LOOKUPS: "2"
           DISCRETE_PER_VALUE_MAX: "35"
+          # Probability limits (user-approved 11/26; Test Bot run 45735552433 passed): binary
+          # forecasts stay inside 2%-98%, every multiple-choice option gets at least 1%.
+          BINARY_PROB_MIN: "0.02"
+          BINARY_PROB_MAX: "0.98"
+          MC_PROB_MIN: "0.01"
           # Spend outside the ledger (local tests, parallel test runs), counted against the cap.
-          SPEND_OFFSET_USD: "22.3" # 9.6 tests outside the ledger + 12.7 gap vs Console on 11/18
+          SPEND_OFFSET_USD: "28.3" # 9.6 tests outside the ledger + 12.7 gap vs Console on 11/18 + 6.0 Test Bot 11/26 (run 45735552433)
           # Second provider (Nebius Token Factory, OpenAI-compatible) for after the Claude
           # credit ends. Switch on since 11/20 (user decision) after four bot-testing-area runs
           # (last: 44563140633, 10/10, no errors). Own ledger, cap and cutoff.

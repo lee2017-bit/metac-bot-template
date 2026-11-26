@@ -73,7 +73,7 @@ jobs:
           RESEARCH_MAX_FETCHES: "3"
           RESEARCH_MAX_MARKET_LOOKUPS: "2"
           DISCRETE_PER_VALUE_MAX: "35"
-          SPEND_OFFSET_USD: "22.3" # 9.6 tests outside the ledger + 12.7 gap vs Console on 11/18
+          SPEND_OFFSET_USD: "28.3" # 9.6 tests outside the ledger + 12.7 gap vs Console on 11/18 + 6.0 Test Bot 11/26 (run 45735552433)
           # Second provider (Nebius Token Factory, OpenAI-compatible) for after the Claude
           # credit ends. Inactive while PROVIDER_SWITCH_AT is empty; set it (and LOOP_UNTIL)
           # only after a Test Bot run on this provider has passed. Own ledger, cap and cutoff.
