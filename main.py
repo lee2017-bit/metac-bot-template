@@ -58,6 +58,47 @@ from discrete_values import (
 )
 from forecasting_tools import MonetaryCostManager
 import os
+from forecasting_tools.data_models.multiple_choice_report import PredictedOption
+
+# Probability limits (user-approved 11/26; item T4 of the 11/18 open-source review).
+# Every reviewed prize-winning open-source bot keeps binary forecasts inside 2%-98%
+# and every multiple-choice option at 1% or more: at 99% instead of 98% a correct
+# call gains about 1 point and a wrong one loses about 69 more. The defaults here are
+# the template's old limits; the workflows set the tighter ones.
+def _limit(name: str, default: float, low: float, high: float) -> float:
+    try:
+        value = float(os.getenv(name, "") or default)
+    except ValueError:
+        value = default
+    return max(low, min(high, value))
+
+
+BINARY_PROB_MIN = _limit("BINARY_PROB_MIN", 0.01, 0.001, 0.49)
+BINARY_PROB_MAX = _limit("BINARY_PROB_MAX", 0.99, 0.51, 0.999)
+MC_PROB_MIN = _limit("MC_PROB_MIN", 0.0, 0.0, 0.2)
+
+
+def apply_option_floor(
+    predicted: PredictedOptionList, minimum: float = MC_PROB_MIN
+) -> PredictedOptionList:
+    """Raise every option to at least `minimum`, taking the difference proportionally
+    from the other options. With more than ten options the floor shrinks so that the
+    floors together never take more than a tenth of the probability."""
+    options = predicted.predicted_options
+    if minimum <= 0 or len(options) < 2:
+        return predicted
+    floor = min(minimum, 0.10 / len(options))
+    if all(o.probability >= floor for o in options):
+        return predicted
+    probabilities = PredictedOptionList._normalize_with_minimum(
+        [o.probability for o in options], minimum_probability=floor
+    )
+    return PredictedOptionList(
+        predicted_options=[
+            PredictedOption(option_name=o.option_name, probability=prob)
+            for o, prob in zip(options, probabilities)
+        ]
+    )
 
 from spend_guard import check_key_expiry, record_run, remaining_budget
 
@@ -452,7 +493,9 @@ class FallTemplateBot2026(ForecastBot):
             num_validation_samples=self._structure_output_validation_samples,
             additional_instructions=parsing_instructions,
         )
-        decimal_pred = max(0.01, min(0.99, binary_prediction.prediction_in_decimal))
+        decimal_pred = max(
+            BINARY_PROB_MIN, min(BINARY_PROB_MAX, binary_prediction.prediction_in_decimal)
+        )
 
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {decimal_pred}."
@@ -530,6 +573,7 @@ class FallTemplateBot2026(ForecastBot):
             num_validation_samples=self._structure_output_validation_samples,
             additional_instructions=parsing_instructions,
         )
+        predicted_option_list = apply_option_floor(predicted_option_list)
 
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {predicted_option_list}."

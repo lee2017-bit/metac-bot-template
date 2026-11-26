@@ -8,6 +8,11 @@ on:
         type: choice
         options: [anthropic, openai_compat]
         default: anthropic
+      profile:
+        description: "MB = the MiniBench set-up used from 11/28 (3 x Opus, 5 searches, own cap)"
+        type: choice
+        options: ["", MB]
+        default: ""
 
 # Own group so a test can run while the forecast loop is running (sharing the
 # loop's group would cancel one of the two). The test therefore does not write
@@ -82,6 +87,25 @@ jobs:
           LLM_KEY_EXPIRES_OC: "2026-12-24T00:00:00Z"
           SPEND_OFFSET_USD_OC: "21.2" # Test Bot runs outside the ledger (11/19): 4.49 + 5.38 + 1.4 timeouts + 4.87 + 4.94
           LLM_PROVIDER: ${{ inputs.provider }}
+          # Probability limits (user-approved 11/26): binary 2%-98%, every multiple-choice
+          # option at least 1%.
+          BINARY_PROB_MIN: "0.02"
+          BINARY_PROB_MAX: "0.98"
+          MC_PROB_MIN: "0.01"
+          # MiniBench profile, same values as bot_loop.yaml but active at once so a test
+          # can exercise it before 11/28. The test never saves a ledger.
+          CONFIG_PROFILE: ${{ inputs.profile }}
+          PROFILE_FROM_MB: "2026-11-01T00:00:00Z"
+          SPEND_LEDGER_MB: spend/ledger_mb.json
+          SPEND_CAP_USD_MB: "75"
+          SPEND_OFFSET_USD_MB: "0"
+          RUN_CAP_USD_MB: "12"
+          LLM_KEY_EXPIRES_MB: "2026-12-25T04:00:00Z"
+          PROVIDER_SWITCH_AT_MB: "2026-12-25T04:00:00Z"
+          SWITCH_ON_CAP_MB: "1"
+          FORECAST_ENSEMBLE_MB: "claude-opus-5-5:3"
+          RESEARCH_MAX_SEARCHES_MB: "5"
+          RESEARCH_FETCH_MAX_TOKENS_MB: "6000"
       - name: Show spend
         if: always()
         run: |
