@@ -78,6 +78,54 @@ BINARY_PROB_MAX = _limit("BINARY_PROB_MAX", 0.99, 0.51, 0.999)
 MC_PROB_MIN = _limit("MC_PROB_MIN", 0.0, 0.0, 0.2)
 
 
+# Multiple-choice answers with the option names written out (daily check 11/27). The
+# template asks for "Option_A: p" lines and leaves it to the parser model to match the
+# letters to the option names. On question 46756 (5 options) the parser swapped the two
+# last options in 2 of 4 forecasts and could not agree with itself on a fifth, which was
+# dropped. With MC_NAMED_OPTIONS=1 every answer line carries the name, and the parser
+# is told which letter is which option.
+MC_NAMED_OPTIONS = os.getenv("MC_NAMED_OPTIONS", "0") == "1"
+
+
+def _option_labels(options: list[str]) -> list[str]:
+    return [
+        f"Option_{chr(65 + i)}" if i < 26 else f"Option_{i + 1}"
+        for i in range(len(options))
+    ]
+
+
+def mc_answer_format(options: list[str]) -> str:
+    if not MC_NAMED_OPTIONS:
+        return (
+            "The last thing you write is your final probabilities for the N options "
+            f"in this order {options} as:\n"
+            "Option_A: Probability_A\nOption_B: Probability_B\n...\nOption_N: Probability_N"
+        )
+    lines = "\n".join(
+        f"{label} ({name}): Probability"
+        for label, name in zip(_option_labels(options), options)
+    )
+    return (
+        "The last thing you write is your final probabilities, one line per option, "
+        "exactly in this form (keep each label and option name as written and replace "
+        "only the word Probability with your number):\n" + lines
+    )
+
+
+def mc_parser_note(options: list[str]) -> str:
+    if not MC_NAMED_OPTIONS:
+        return ""
+    mapping = "; ".join(
+        f"{label} = {name}" for label, name in zip(_option_labels(options), options)
+    )
+    return (
+        "\nThe labels refer to the options in exactly this order: " + mapping + ". "
+        "When a line gives a label and an option name, they are the same option. Keep "
+        "every probability with the option it was written for; never move a probability "
+        "to a different option."
+    )
+
+
 def apply_option_floor(
     predicted: PredictedOptionList, minimum: float = MC_PROB_MIN
 ) -> PredictedOptionList:
@@ -540,11 +588,7 @@ class FallTemplateBot2026(ForecastBot):
             {self._get_conditional_disclaimer_if_necessary(question)}
             You write your rationale remembering that (1) good forecasters put extra weight on the status quo outcome since the world changes slowly most of the time, and (2) good forecasters leave some moderate probability on most options to account for unexpected outcomes.
 
-            The last thing you write is your final probabilities for the N options in this order {question.options} as:
-            Option_A: Probability_A
-            Option_B: Probability_B
-            ...
-            Option_N: Probability_N
+            {mc_answer_format(question.options)}
             """
         )
         return await self._multiple_choice_prompt_to_forecast(question, prompt)
@@ -560,7 +604,7 @@ class FallTemplateBot2026(ForecastBot):
             {question.options}
 
             The text you are parsing may prepend these options with some variation of "Option" which you should remove if not part of the option names I just gave you.
-            Additionally, you may sometimes need to parse a 0% probability. Please do not skip options with 0% but rather make it an entry in your final list with 0% probability.
+            Additionally, you may sometimes need to parse a 0% probability. Please do not skip options with 0% but rather make it an entry in your final list with 0% probability.{mc_parser_note(question.options)}
             {self._create_resolved_question_parsing_message()}
             """
         )

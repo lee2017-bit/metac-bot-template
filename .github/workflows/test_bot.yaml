@@ -92,6 +92,8 @@ jobs:
           BINARY_PROB_MIN: "0.02"
           BINARY_PROB_MAX: "0.98"
           MC_PROB_MIN: "0.01"
+          # Multiple-choice answers carry the option names (daily check 11/27).
+          MC_NAMED_OPTIONS: "1"
           # MiniBench profile, same values as bot_loop.yaml but active at once so a test
           # can exercise it before 11/28. The test never saves a ledger.
           CONFIG_PROFILE: ${{ inputs.profile }}
