@@ -82,7 +82,7 @@ jobs:
           FORECAST_ENSEMBLE_OC: "moonshotai/Kimi-K3:3"
           RESEARCH_MODEL_OC: zai-org/GLM-5.3
           PARSER_MODEL_OC: zai-org/GLM-5.3-Flash
-          SPEND_CAP_USD_OC: "70" # live posting; the re-forecast experiment has its own $25 (total Nebius <= $95, balance $110.99 on 11/20)
+          SPEND_CAP_USD_OC: "78" # live posting (user 11/27: raised from 70). Total Nebius stays <= $95 billed: billed so far $37.82 (balance $90.50 on 11/27), and the ledger counts high, so 78 - 21.2 offset = $56.8 counted <= $57 left
           RUN_CAP_USD_OC: "8"
           LLM_KEY_EXPIRES_OC: "2026-12-24T00:00:00Z"
           SPEND_OFFSET_USD_OC: "21.2" # Test Bot runs outside the ledger (11/19): 4.49 + 5.38 + 1.4 timeouts + 4.87 + 4.94
