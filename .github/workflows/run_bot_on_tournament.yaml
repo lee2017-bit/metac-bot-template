@@ -69,8 +69,11 @@ jobs:
           BINARY_PROB_MIN: "0.02"
           BINARY_PROB_MAX: "0.98"
           MC_PROB_MIN: "0.01"
+          # Multiple-choice answer lines carry the option names, so the parser cannot attach a
+          # probability to the wrong option (daily check 11/27; Test Bot run 45994140308 passed).
+          MC_NAMED_OPTIONS: "1"
           # Spend outside the ledger (local tests, parallel test runs), counted against the cap.
-          SPEND_OFFSET_USD: "28.3" # 9.6 tests outside the ledger + 12.7 gap vs Console on 11/18 + 6.0 Test Bot 11/26 (run 45735552433)
+          SPEND_OFFSET_USD: "34.5" # 9.6 tests outside the ledger + 12.7 gap vs Console on 11/18 + 6.0 Test Bot 11/26 (run 45735552433) + 6.2 Test Bot 11/27 (run 45994140308)
           # Second provider (Nebius Token Factory, OpenAI-compatible) for after the Claude
           # credit ends. Switch on since 11/20 (user decision) after four bot-testing-area runs
           # (last: 44563140633, 10/10, no errors). Own ledger, cap and cutoff.
