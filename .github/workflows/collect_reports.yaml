@@ -1,0 +1,65 @@
+name: Collect report artifacts (read-only)
+
+# Gathers the per-run "reports-<run id>" artifacts into one artifact so they
+# can be archived before the 90-day artifact retention runs out. It reads
+# artifacts only: nothing is forecast or posted.
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "Only artifacts created at or after this UTC time"
+        default: "2026-11-15T00:00:00Z"
+      until:
+        description: "Only artifacts created before this UTC time"
+        default: "2026-12-31T00:00:00Z"
+
+concurrency:
+  group: collect-reports
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Download and merge report artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SINCE: ${{ inputs.since }}
+          UNTIL: ${{ inputs.until }}
+        run: |
+          set -euo pipefail
+          mkdir -p merged work
+          gh api --paginate "repos/$REPO/actions/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name | startswith("reports-")) | select(.expired | not)
+                  | [.id, .name, .created_at, .size_in_bytes] | @tsv' > list.tsv
+          echo "report artifacts listed: $(wc -l < list.tsv)"
+          n=0
+          while IFS=$'\t' read -r id name created size; do
+            [[ "$created" < "$SINCE" || ! "$created" < "$UNTIL" ]] && continue
+            run="${name#reports-}"
+            rm -rf work/*
+            gh api "repos/$REPO/actions/artifacts/$id/zip" > work/a.zip || { echo "skip $name"; continue; }
+            unzip -q -o work/a.zip -d work/x || continue
+            # Keep only report files that hold at least one question.
+            find work/x -type f -name '*.json' ! -name '*--0-questions.json' | while read -r f; do
+              mkdir -p "merged/$run"
+              cp "$f" "merged/$run/"
+            done
+            n=$((n+1))
+          done < list.tsv
+          echo "artifacts read: $n"
+          echo "runs with reports: $(find merged -mindepth 1 -maxdepth 1 -type d | wc -l)"
+          echo "report files: $(find merged -type f | wc -l)"
+          cp list.tsv merged/artifact-list.tsv
+          du -sh merged
+      - uses: actions/upload-artifact@v4
+        with:
+          name: collected-reports-${{ github.run_id }}
+          path: merged/
+          retention-days: 30
